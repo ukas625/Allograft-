@@ -6,169 +6,115 @@ import os
 from datetime import timedelta
 
 # ─────────────────────────────────────────
-
 # KONFIGURATION – hier anpassen
-
 # ─────────────────────────────────────────
 
-VIDEO_PFAD = r”C:\Users\DeinName\Videos\messung.mp4”  # <– deinen Pfad eintragen
+VIDEO_PFAD = r"C:\Users\DeinName\Videos\messung.mp4"  # <-- deinen Pfad eintragen
 
-# Alle wie viele Sekunden soll ein Frame analysiert werden?
+INTERVALL_SEK = 1  # Alle wie viele Sekunden ein Frame analysiert wird
 
-# 1 = jede Sekunde, 5 = alle 5 Sekunden
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
-INTERVALL_SEK = 1
-
-# Tesseract Pfad (nur Windows nötig)
-
-pytesseract.pytesseract.tesseract_cmd = r”C:\Program Files\Tesseract-OCR\tesseract.exe”
-
-# Regionen of Interest (ROI) – Bereiche wo die Zahlen sitzen
-
-# Format: {“Name”: (x1, y1, x2, y2)}
-
-# Erstmal KEINE ROIs definiert → ganzer Bildschirm wird analysiert
-
-# Sobald du weißt wo die Zahlen sind, hier eintragen z.B.:
-
+# Erst leer lassen, nach dem Screenshot die Koordinaten eintragen
+ROIS = {}
 # ROIS = {
-
-# “Schicht_1”: (100, 50, 300, 120),
-
-# “Schicht_2”: (100, 150, 300, 220),
-
-# “Schicht_3”: (100, 250, 300, 320),
-
+#     "Schicht_1": (100, 50, 300, 120),
+#     "Schicht_2": (100, 150, 300, 220),
 # }
 
-ROIS = {}  # leer = ganzer Frame
-
 # ─────────────────────────────────────────
+
 
 def bild_vorverarbeiten(frame):
-“”“Bild für bessere OCR-Erkennung aufbereiten”””
-grau = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-grau = cv2.resize(grau, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-grau = cv2.GaussianBlur(grau, (3, 3), 0)
-_, binaer = cv2.threshold(grau, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-return binaer
+    grau = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    grau = cv2.resize(grau, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    grau = cv2.GaussianBlur(grau, (3, 3), 0)
+    _, binaer = cv2.threshold(grau, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return binaer
+
 
 def zahlen_extrahieren(frame, roi=None):
-“”“Aus einem Frame (oder ROI) alle Zahlen per OCR lesen”””
-if roi:
-x1, y1, x2, y2 = roi
-frame = frame[y1:y2, x1:x2]
+    if roi:
+        x1, y1, x2, y2 = roi
+        frame = frame[y1:y2, x1:x2]
+    verarbeitet = bild_vorverarbeiten(frame)
+    config = '--psm 6 -c tessedit_char_whitelist=0123456789.,'
+    text = pytesseract.image_to_string(verarbeitet, config=config)
+    zahlen = re.findall(r'\d+[.,]?\d*', text)
+    zahlen = [float(z.replace(',', '.')) for z in zahlen]
+    return zahlen
 
-```
-verarbeitet = bild_vorverarbeiten(frame)
-
-config = '--psm 6 -c tessedit_char_whitelist=0123456789.,'
-text = pytesseract.image_to_string(verarbeitet, config=config)
-
-# Alle Zahlen im Text finden
-zahlen = re.findall(r'\d+[.,]?\d*', text)
-zahlen = [float(z.replace(',', '.')) for z in zahlen]
-
-return zahlen
-```
 
 def debug_screenshot(video_pfad):
-“”“Speichert den ersten Frame als Bild – zum Bestimmen der ROI-Koordinaten”””
-cap = cv2.VideoCapture(video_pfad)
-ret, frame = cap.read()
-cap.release()
+    cap = cv2.VideoCapture(video_pfad)
+    ret, frame = cap.read()
+    cap.release()
+    if ret:
+        pfad = os.path.splitext(video_pfad)[0] + "_screenshot.jpg"
+        cv2.imwrite(pfad, frame)
+        print(f"Screenshot gespeichert: {pfad}")
+        print(f"Bildgroesse: {frame.shape[1]}x{frame.shape[0]} Pixel")
+    else:
+        print("Fehler: Kein Bild aus Video lesbar")
 
-```
-if ret:
-    screenshot_pfad = os.path.splitext(video_pfad)[0] + "_screenshot.jpg"
-    cv2.imwrite(screenshot_pfad, frame)
-    print(f"✅ Screenshot gespeichert unter: {screenshot_pfad}")
-    print(f"   Bildgröße: {frame.shape[1]}x{frame.shape[0]} Pixel")
-    print("   Öffne das Bild und notiere die Koordinaten der Zahlen")
-    print("   Dann in ROIS eintragen und nochmal laufen lassen")
-else:
-    print("❌ Konnte kein Bild aus dem Video lesen")
-```
 
 def video_analysieren(video_pfad, intervall_sek, rois):
-cap = cv2.VideoCapture(video_pfad)
+    cap = cv2.VideoCapture(video_pfad)
+    if not cap.isOpened():
+        print(f"Fehler: Video konnte nicht geoeffnet werden: {video_pfad}")
+        return None
 
-```
-if not cap.isOpened():
-    print(f"❌ Video konnte nicht geöffnet werden: {video_pfad}")
-    return None
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    gesamt_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    gesamt_sek = gesamt_frames / fps
+    frame_intervall = int(fps * intervall_sek)
 
-fps = cap.get(cv2.CAP_PROP_FPS)
-gesamt_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-gesamt_sek = gesamt_frames / fps
-frame_intervall = int(fps * intervall_sek)
+    print(f"Video: {os.path.basename(video_pfad)}")
+    print(f"FPS: {fps:.1f} | Dauer: {timedelta(seconds=int(gesamt_sek))} | Frames: {gesamt_frames}\n")
 
-print(f"📹 Video geladen: {os.path.basename(video_pfad)}")
-print(f"   FPS: {fps:.1f} | Dauer: {timedelta(seconds=int(gesamt_sek))} | Frames: {gesamt_frames}")
-print(f"   Analysiere jeden {intervall_sek}. Sekunde ({gesamt_sek / intervall_sek:.0f} Frames total)\n")
+    ergebnisse = []
+    frame_nr = 0
 
-ergebnisse = []
-frame_nr = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
+        if frame_nr % frame_intervall == 0:
+            zeitstempel = frame_nr / fps
+            zeitstempel_str = str(timedelta(seconds=int(zeitstempel)))
 
-    if frame_nr % frame_intervall == 0:
-        zeitstempel = frame_nr / fps
-        zeitstempel_str = str(timedelta(seconds=int(zeitstempel)))
+            if rois:
+                zeile = {"zeitstempel_sek": round(zeitstempel, 2), "zeitstempel": zeitstempel_str}
+                for name, roi in rois.items():
+                    zahlen = zahlen_extrahieren(frame, roi)
+                    zeile[name] = zahlen[0] if zahlen else None
+                ergebnisse.append(zeile)
+            else:
+                zahlen = zahlen_extrahieren(frame)
+                zeile = {
+                    "zeitstempel_sek": round(zeitstempel, 2),
+                    "zeitstempel": zeitstempel_str,
+                    "gefundene_zahlen": zahlen
+                }
+                ergebnisse.append(zeile)
 
-        if rois:
-            # Jede ROI einzeln auslesen
-            zeile = {"zeitstempel_sek": round(zeitstempel, 2), "zeitstempel": zeitstempel_str}
-            for name, roi in rois.items():
-                zahlen = zahlen_extrahieren(frame, roi)
-                zeile[name] = zahlen[0] if zahlen else None
-            ergebnisse.append(zeile)
-        else:
-            # Ganzen Frame auslesen – alle gefundenen Zahlen
-            zahlen = zahlen_extrahieren(frame)
-            zeile = {
-                "zeitstempel_sek": round(zeitstempel, 2),
-                "zeitstempel": zeitstempel_str,
-                "gefundene_zahlen": zahlen
-            }
-            ergebnisse.append(zeile)
+            print(f"{zeitstempel_str} --> {zeile}")
 
-        print(f"  ⏱ {zeitstempel_str} → {zeile}")
+        frame_nr += 1
 
-    frame_nr += 1
+    cap.release()
+    return pd.DataFrame(ergebnisse)
 
-cap.release()
 
-df = pd.DataFrame(ergebnisse)
-return df
-```
+if __name__ == "__main__":
+    debug_screenshot(VIDEO_PFAD)
 
-# ─────────────────────────────────────────
+    df = video_analysieren(VIDEO_PFAD, INTERVALL_SEK, ROIS)
 
-# MAIN
-
-# ─────────────────────────────────────────
-
-if **name** == “**main**”:
-
-```
-# SCHRITT 1: Erstmal Screenshot machen um ROIs zu bestimmen
-# Einmal ausführen, Bild anschauen, Koordinaten notieren, dann auskommentieren
-debug_screenshot(VIDEO_PFAD)
-
-# SCHRITT 2: Video analysieren
-df = video_analysieren(VIDEO_PFAD, INTERVALL_SEK, ROIS)
-
-if df is not None:
-    print(f"\n✅ Fertig! {len(df)} Messpunkte erfasst")
-    print("\nVorschau:")
-    print(df.head(10))
-
-    # Als CSV speichern
-    csv_pfad = os.path.splitext(VIDEO_PFAD)[0] + "_ergebnis.csv"
-    df.to_csv(csv_pfad, index=False, sep=";", decimal=",")
-    print(f"\n💾 Gespeichert als: {csv_pfad}")
-```
+    if df is not None:
+        print(f"\nFertig! {len(df)} Messpunkte erfasst")
+        print(df.head(10))
+        csv_pfad = os.path.splitext(VIDEO_PFAD)[0] + "_ergebnis.csv"
+        df.to_csv(csv_pfad, index=False, sep=";", decimal=",")
+        print(f"Gespeichert als: {csv_pfad}")
