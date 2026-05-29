@@ -1,0 +1,269 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy import stats
+
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans, DBSCAN
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import cross_val_score
+from sklearn.metrics import silhouette_score
+
+import warnings
+warnings.filterwarnings('ignore')
+
+plt.rcParams['figure.dpi'] = 130
+print('✅ Imports OK')
+
+
+
+
+
+COL_FAUF    = 'FAUF'
+COL_REZEPT  = 'Kaschlerpastenrezeptur'
+COL_ANFANG  = 'Kaschlerpastenauftrag Satzanfang [g/m²]'
+COL_ENDE    = 'Kaschlerpastenauftrag Satzende [g/m²]'
+COL_WALZE   = 'Walzenbezeichnung'
+COL_WECHSEL = 'Walze zu Satzanfang gewechselt? (j/n)'
+COL_FRISCH  = 'Walze frisch vom WSC (j/n)'
+COL_MERKMAL = 'Kurztext zu Prüfmerkmal'
+COL_WERT    = 'Mittelwert'
+
+VB_LAENGS   = 'Verbundhaftung / längs'
+VB_QUER     = 'Verbundhaftung / quer'
+
+
+
+
+
+
+
+
+
+
+
+
+# Long → Wide: eine Zeile pro FAUF
+pivot = result.pivot_table(
+    index=COL_FAUF,
+    columns=COL_MERKMAL,
+    values=COL_WERT,
+    aggfunc='mean'
+).reset_index()
+pivot.columns.name = None
+
+# Produktionsparameter 1× pro FAUF
+param_cols = [COL_FAUF, COL_REZEPT, COL_ANFANG, COL_ENDE,
+              COL_WALZE, COL_WECHSEL, COL_FRISCH]
+params = result[param_cols].drop_duplicates(subset=COL_FAUF)
+
+df = pd.merge(params, pivot, on=COL_FAUF, how='inner')
+
+# Neue Features
+df['Drift_Paste'] = df[COL_ANFANG] - df[COL_ENDE]
+df['Drift_abs']   = df['Drift_Paste'].abs()
+df['Rezept_Gruppe'] = df[COL_REZEPT].str.extract(r'(P\d{4}|S\d{4})')
+
+for col in [COL_WECHSEL, COL_FRISCH]:
+    df[col + '_enc'] = (
+        df[col].str.strip().str.lower()
+        .map({'ja': 1, 'j': 1, 'nein': 0, 'n': 0})
+        .fillna(0).astype(int)
+    )
+
+print(f'Shape: {df.shape}  |  FAUFs: {df[COL_FAUF].nunique()}')
+df[[COL_ANFANG, COL_ENDE, 'Drift_Paste', VB_LAENGS, VB_QUER]].describe().round(2)
+
+
+
+
+
+
+
+
+for col in [VB_LAENGS, VB_QUER]:
+    df[col + '_z'] = stats.zscore(df[col].fillna(df[col].mean()))
+
+ausreisser = df[(df[VB_LAENGS + '_z'].abs() > 2) | (df[VB_QUER + '_z'].abs() > 2)]
+print(f'Ausreißer: {len(ausreisser)} FAUFs')
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 4))
+for ax, col, c in zip(axes, [VB_LAENGS, VB_QUER], ['steelblue', 'tomato']):
+    ax.hist(df[col + '_z'].dropna(), bins=20, color=c, alpha=0.8, edgecolor='white')
+    ax.axvline( 2, color='red', linestyle='--', label='±2σ')
+    ax.axvline(-2, color='red', linestyle='--')
+    ax.set_title(f'Z-Score — {col}')
+    ax.legend()
+plt.tight_layout()
+plt.show()
+
+display(ausreisser[[COL_FAUF, COL_REZEPT, VB_LAENGS, VB_QUER, 'Drift_Paste']].reset_index(drop=True))
+
+
+
+num_cols = [COL_ANFANG, COL_ENDE, 'Drift_Paste', 'Drift_abs',
+            COL_WECHSEL + '_enc', COL_FRISCH + '_enc',
+            VB_LAENGS, VB_QUER]
+num_cols = [c for c in num_cols if c in df.columns]
+
+corr = df[num_cols].corr()
+
+fig, ax = plt.subplots(figsize=(10, 7))
+sns.heatmap(corr, annot=True, fmt='.2f', cmap='RdYlGn',
+            center=0, linewidths=0.5, ax=ax)
+ax.set_title('Korrelationsmatrix', fontsize=13)
+plt.tight_layout()
+plt.show()
+
+print('\nTop Korrelationen mit Verbundhaftung / längs:')
+print(corr[VB_LAENGS].drop(VB_LAENGS).sort_values(key=abs, ascending=False).round(
+
+
+
+
+
+cluster_features = [COL_ANFANG, COL_ENDE, 'Drift_abs',
+                    COL_WECHSEL + '_enc', COL_FRISCH + '_enc',
+                    VB_LAENGS, VB_QUER]
+cluster_features = [c for c in cluster_features if c in df.columns]
+
+df_c      = df[cluster_features].dropna()
+idx_valid = df_c.index
+
+X        = StandardScaler().fit_transform(df_c)
+X_pca    = PCA(n_components=2).fit_transform(X)
+var_expl = PCA(n_components=2).fit(X).explained_variance_ratio_
+
+print(f'Gültige FAUFs: {len(df_c)}')
+print(f'PCA: PC1={var_expl[0]:.1%}, PC2={var_expl[1]:.1%}')
+
+
+
+
+
+
+
+
+
+
+inertias, sil_scores = [], []
+K_range = range(2, 9)
+
+for k in K_range:
+    km = KMeans(n_clusters=k, random_state=42, n_init=10)
+    km.fit(X)
+    inertias.append(km.inertia_)
+    sil_scores.append(silhouette_score(X, km.labels_))
+
+best_k = list(K_range)[np.argmax(sil_scores)]
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+axes[0].plot(K_range, inertias, 'bo-', markersize=8)
+axes[0].set_title('Elbow-Methode')
+axes[0].grid(True, alpha=0.3)
+
+axes[1].plot(K_range, sil_scores, 'rs-', markersize=8)
+axes[1].axvline(best_k, color='green', linestyle='--', label=f'Optimales k={best_k}')
+axes[1].set_title('Silhouette Score')
+axes[1].legend()
+axes[1].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+print(f'✅ Optimales k = {best_k}')
+
+
+
+
+
+
+kmeans = KMeans(n_clusters=best_k, random_state=42, n_init=10)
+df.loc[idx_valid, 'Cluster_KMeans'] = kmeans.fit_predict(X)
+
+fig, ax = plt.subplots(figsize=(9, 6))
+sc = ax.scatter(X_pca[:, 0], X_pca[:, 1],
+                c=df.loc[idx_valid, 'Cluster_KMeans'],
+                cmap='tab10', s=90, edgecolors='white')
+ax.set_xlabel(f'PC1 ({var_expl[0]:.1%})')
+ax.set_ylabel(f'PC2 ({var_expl[1]:.1%})')
+ax.set_title(f'K-Means (k={best_k})')
+plt.colorbar(sc, label='Cluster')
+plt.tight_layout()
+plt.show()
+
+display(df.groupby('Cluster_KMeans')[[VB_LAENGS, VB_QUER, COL_ANFANG, 'Drift_abs']].mean().round(2))
+
+
+
+
+
+
+
+
+
+
+
+
+db = DBSCAN(eps=1.0, min_samples=3)
+df.loc[idx_valid, 'Cluster_DBSCAN'] = db.fit_predict(X)
+n_out = (df['Cluster_DBSCAN'] == -1).sum()
+
+fig, ax = plt.subplots(figsize=(9, 6))
+colors = ['red' if l == -1 else 'steelblue' for l in df.loc[idx_valid, 'Cluster_DBSCAN']]
+ax.scatter(X_pca[:, 0], X_pca[:, 1], c=colors, s=90, edgecolors='white')
+ax.set_title(f'DBSCAN — {n_out} Ausreißer (rot)')
+
+from matplotlib.patches import Patch
+ax.legend(handles=[Patch(color='steelblue', label='Normal'),
+                   Patch(color='red', label=f'Ausreißer n={n_out}')])
+plt.tight_layout()
+plt.show()
+
+display(df[df['Cluster_DBSCAN'] == -1][[COL_FAUF, COL_REZEPT, VB_LAENGS, VB_QUER, 'Drift_Paste']])
+
+
+
+
+
+
+
+
+
+
+
+
+df['Rezept_enc'] = LabelEncoder().fit_transform(df['Rezept_Gruppe'].fillna('Unbekannt'))
+df['Walze_enc']  = LabelEncoder().fit_transform(df[COL_WALZE].fillna('Unbekannt'))
+
+rf_features = [COL_ANFANG, COL_ENDE, 'Drift_Paste', 'Drift_abs',
+               COL_WECHSEL + '_enc', COL_FRISCH + '_enc',
+               'Rezept_enc', 'Walze_enc']
+
+fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+
+for ax, target, color in zip(axes, [VB_LAENGS, VB_QUER], ['steelblue', 'tomato']):
+    mask = df[rf_features + [target]].dropna().index
+    X_rf, y_rf = df.loc[mask, rf_features], df.loc[mask, target]
+
+    rf = RandomForestRegressor(n_estimators=300, max_depth=6, random_state=42)
+    rf.fit(X_rf, y_rf)
+    cv_r2 = cross_val_score(rf, X_rf, y_rf, cv=5, scoring='r2')
+
+    imp = pd.Series(rf.feature_importances_, index=rf_features).sort_values()
+    bar_colors = [color if v > imp.quantile(0.6) else '#cccccc' for v in imp]
+    ax.barh(imp.index, imp.values, color=bar_colors, edgecolor='white')
+    ax.set_title(f'{target}\nR² CV: {cv_r2.mean():.3f} ± {cv_r2.std():.3f}')
+    ax.grid(True, alpha=0.3, axis='x')
+
+    print(f'\n{target} — Top 3:')
+    print(imp.sort_values(ascending=False).head(3).round(3))
+
+plt.tight_layout()
+plt.show()
+
+
+
+
+
