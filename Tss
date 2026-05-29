@@ -1,131 +1,28 @@
-import re
-
-# ── 0. 999 Sentinel VOR Pivot entfernen ──────────────────────
-result[COL_WERT] = result[COL_WERT].replace(999, np.nan).replace(999.0, np.nan)
-
-# ── 1. Pivot Long → Wide ──────────────────────────────────────
-pivot = result.pivot_table(
-    index=COL_FAUF,
-    columns=COL_MERKMAL,
-    values=COL_WERT,
-    aggfunc='mean'
-).reset_index()
-pivot.columns.name = None
-
-# ── 2. Produktionsparameter 1× pro FAUF ──────────────────────
-param_cols = [COL_FAUF, COL_REZEPT, COL_ANFANG, COL_ENDE,
-              COL_SCHAUM, COL_WALZE, COL_WECHSEL, COL_FRISCH]
-param_cols  = [c for c in param_cols if c in result.columns]
-params      = result[param_cols].drop_duplicates(subset=COL_FAUF)
-df          = pd.merge(params, pivot, on=COL_FAUF, how='inner')
-
-# ── 3. Plausibilitätsfilter ───────────────────────────────────
 for col in [VB_LAENGS, VB_QUER]:
-    if col in df.columns:
-        df[col] = df[col].where(df[col] <= 300, np.nan)
+    df[col + '_z'] = stats.zscore(df[col].fillna(df[col].mean()))
 
-# ── 4. Numerische Features ────────────────────────────────────
-df['Drift_Paste']     = df[COL_ANFANG] - df[COL_ENDE]
-df['Drift_abs']       = df['Drift_Paste'].abs()
-df['Drift_Paste_imp'] = df['Drift_Paste'].fillna(0)
-df['Drift_abs_imp']   = df['Drift_abs'].fillna(0)
-df['Hat_Satzende']    = df[COL_ENDE].notna().astype(int)
+ausreisser = df[
+    (df[VB_LAENGS + '_z'].abs() > 2) |
+    (df[VB_QUER   + '_z'].abs() > 2)
+]
+print(f'Ausreißer (|Z| > 2): {len(ausreisser)} FAUFs\n')
 
-# ── 5. Ja/Nein Encoding ───────────────────────────────────────
-# Varianten: Ja, ja, j, J, Nein, nein, n, N, NaN
-for col in [COL_WECHSEL, COL_FRISCH]:
-    if col in df.columns:
-        df[col + '_enc'] = (
-            df[col].astype(str).str.strip().str.lower()
-            .map({'ja': 1, 'j': 1, 'nein': 0, 'n': 0, 'nan': 0})
-            .fillna(0).astype(int)
-        )
+fig, axes = plt.subplots(1, 2, figsize=(14, 4))
+for ax, col, c in zip(axes, [VB_LAENGS, VB_QUER], ['steelblue', 'tomato']):
+    ax.hist(df[col + '_z'].dropna(), bins=20,
+            color=c, alpha=0.8, edgecolor='white')
+    ax.axvline( 2, color='red', linestyle='--', linewidth=1.5, label='±2σ')
+    ax.axvline(-2, color='red', linestyle='--', linewidth=1.5)
+    ax.set_title(f'Z-Score — {col}')
+    ax.set_xlabel('Z-Score')
+    ax.set_ylabel('Anzahl FAUFs')
+    ax.legend()
+plt.tight_layout()
+plt.show()
 
-# ── 6. Walzenbezeichnung normalisieren ────────────────────────
-# R07/02 = R 07/02 = R7/02 = ro7 o2 = Ro7/02
-# R11/04 = R 11/04
-def normalize_walze(w):
-    if pd.isna(w):
-        return 'Unbekannt'
-    w = str(w).strip().upper()
-    w = w.replace(' ', '')
-    w = w.replace('RO', 'R0')
-    w = re.sub(r'^R(\d)/', r'R0\1/', w)
-    return w
-
-df['Walze_norm'] = df[COL_WALZE].apply(normalize_walze)
-walze_ohe  = pd.get_dummies(df['Walze_norm'], prefix='Walze')
-df         = pd.concat([df, walze_ohe], axis=1)
-walze_cols = list(walze_ohe.columns)
-
-# ── 7. Schaumpastenrezeptur normalisieren ─────────────────────
-# T28 55 m10 = T28/55/M10 = T28/55/m10
-def normalize_schaum(s):
-    if pd.isna(s):
-        return 'Unbekannt'
-    s = str(s).strip().upper()
-    s = re.sub(r'\s+', '/', s)
-    s = re.sub(r'-{2,}', '--', s)
-    s = re.sub(r'/{2,}', '/', s)
-    return s
-
-df['Schaum_norm']  = df[COL_SCHAUM].apply(normalize_schaum)
-schaum_counts      = df['Schaum_norm'].value_counts()
-top_schaum         = schaum_counts[schaum_counts >= 5].index
-df['Schaum_clean'] = df['Schaum_norm'].where(
-    df['Schaum_norm'].isin(top_schaum), other='Sonstige'
-)
-schaum_ohe  = pd.get_dummies(df['Schaum_clean'], prefix='Schaum')
-df          = pd.concat([df, schaum_ohe], axis=1)
-schaum_cols = list(schaum_ohe.columns)
-
-# ── 8. Kaschierpastenrezeptur normalisieren ───────────────────
-# P5582/85/91 = 5582/85/91 = 5582 85 91
-def normalize_rezept(r):
-    if pd.isna(r):
-        return 'Unbekannt'
-    r = str(r).strip().upper()
-    r = re.sub(r'^P', '', r)
-    r = re.sub(r'\s+', '/', r)
-    r = re.sub(r'/{2,}', '/', r)
-    return r
-
-df['Rezept_norm']  = df[COL_REZEPT].apply(normalize_rezept)
-rezept_counts      = df['Rezept_norm'].value_counts()
-top_rezept         = rezept_counts[rezept_counts >= 3].index
-df['Rezept_clean'] = df['Rezept_norm'].where(
-    df['Rezept_norm'].isin(top_rezept), other='Sonstige'
-)
-rezept_ohe  = pd.get_dummies(df['Rezept_clean'], prefix='Rezept')
-df          = pd.concat([df, rezept_ohe], axis=1)
-rezept_cols = list(rezept_ohe.columns)
-
-# ── 9. Kontrolle ──────────────────────────────────────────────
-print(f'Shape: {df.shape}  |  FAUFs: {df[COL_FAUF].nunique()}')
-print(f'\nFehlende Werte:')
-print(df[[COL_ANFANG, COL_ENDE, 'Drift_Paste',
-          VB_LAENGS, VB_QUER]].isna().sum())
-
-print(f"""
-╔══════════════════════════════════════════╗
-  OHE ZUSAMMENFASSUNG
-  Walze:         {len(walze_cols):>3} Spalten → {list(df['Walze_norm'].unique())}
-  Schaum:        {len(schaum_cols):>3} Spalten
-  Kaschierpaste: {len(rezept_cols):>3} Spalten
-  ──────────────────────────────────────────
-  Gesamt neu:    {len(walze_cols+schaum_cols+rezept_cols):>3} Spalten
-╚══════════════════════════════════════════╝
-""")
-
-print('\nWalze nach Normalisierung:')
-print(df['Walze_norm'].value_counts().to_string())
-print('\nSchaum Top 10 nach Normalisierung:')
-print(df['Schaum_clean'].value_counts().head(10).to_string())
-print('\nRezept Top 10 nach Normalisierung:')
-print(df['Rezept_clean'].value_counts().head(10).to_string())
-
-df[[COL_ANFANG, COL_ENDE, 'Drift_Paste',
-    VB_LAENGS, VB_QUER]].describe().round(2)
+display(ausreisser[[COL_FAUF, COL_REZEPT, COL_SCHAUM,
+                    VB_LAENGS, VB_QUER, 'Drift_Paste_imp']]
+        .reset_index(drop=True))
 
 
 
@@ -134,14 +31,40 @@ df[[COL_ANFANG, COL_ENDE, 'Drift_Paste',
 
 
 
-# OHE Features für Clustering
-# Numerische + binäre + OHE kategorische Features
-cluster_features = [
-    # Numerisch
+
+
+num_cols = [
     COL_ANFANG, 'Drift_Paste_imp', 'Drift_abs_imp', 'Hat_Satzende',
-    # Binär (ja/nein bereits korrekt)
     COL_WECHSEL + '_enc', COL_FRISCH + '_enc',
-    # Zielgrößen
+    VB_LAENGS, VB_QUER
+]
+num_cols = [c for c in num_cols if c in df.columns]
+corr     = df[num_cols].corr()
+
+fig, ax = plt.subplots(figsize=(11, 8))
+sns.heatmap(corr, annot=True, fmt='.2f', cmap='RdYlGn',
+            center=0, linewidths=0.5, ax=ax, annot_kws={'size': 10})
+ax.set_title('Korrelationsmatrix — Prozessparameter vs. Verbundhaftung',
+             fontsize=13, pad=12)
+plt.tight_layout()
+plt.show()
+
+print('Top Korrelationen mit VB längs:')
+print(corr[VB_LAENGS].drop(VB_LAENGS)
+      .sort_values(key=abs, ascending=False).round(3))
+print('\nTop Korrelationen mit VB quer:')
+print(corr[VB_QUER].drop(VB_QUER)
+      .sort_values(key=abs, ascending=False).round(3))
+
+
+
+
+
+
+
+cluster_features = [
+    COL_ANFANG, 'Drift_Paste_imp', 'Drift_abs_imp', 'Hat_Satzende',
+    COL_WECHSEL + '_enc', COL_FRISCH + '_enc',
     VB_LAENGS, VB_QUER
 ] + walze_cols + schaum_cols + rezept_cols
 
@@ -155,9 +78,9 @@ pca      = PCA(n_components=2)
 X_pca    = pca.fit_transform(X)
 var_expl = pca.explained_variance_ratio_
 
-print(f'Gültige FAUFs:    {len(df_c)} von {len(df)}')
-print(f'Anzahl Features:  {len(cluster_features)}')
-print(f'  davon OHE:      {len(walze_cols+schaum_cols+rezept_cols)}')
+print(f'Gültige FAUFs:   {len(df_c)} von {len(df)}')
+print(f'Anzahl Features: {len(cluster_features)}')
+print(f'  davon OHE:     {len(walze_cols+schaum_cols+rezept_cols)}')
 print(f'PCA: PC1={var_expl[0]:.1%}, PC2={var_expl[1]:.1%}, '
       f'Gesamt={sum(var_expl):.1%}')
 
@@ -167,17 +90,139 @@ print(f'PCA: PC1={var_expl[0]:.1%}, PC2={var_expl[1]:.1%}, '
 
 
 
+inertias, sil_scores = [], []
+K_range = range(2, 9)
+
+for k in K_range:
+    km = KMeans(n_clusters=k, random_state=42, n_init=10)
+    km.fit(X)
+    inertias.append(km.inertia_)
+    sil_scores.append(silhouette_score(X, km.labels_))
+
+best_k = list(K_range)[np.argmax(sil_scores)]
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+axes[0].plot(K_range, inertias, 'bo-', markersize=8)
+axes[0].set_xlabel('k')
+axes[0].set_ylabel('Inertia')
+axes[0].set_title('Elbow-Methode')
+axes[0].grid(True, alpha=0.3)
+
+axes[1].plot(K_range, sil_scores, 'rs-', markersize=8)
+axes[1].axvline(best_k, color='green', linestyle='--',
+                label=f'Optimales k={best_k}')
+axes[1].set_xlabel('k')
+axes[1].set_ylabel('Silhouette Score')
+axes[1].set_title('Silhouette Score (höher = besser)')
+axes[1].legend()
+axes[1].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+print(f'✅ Optimales k = {best_k}')
 
 
-# Für RF: OHE Features (konsistent mit Clustering)
+
+
+
+
+
+
+
+kmeans = KMeans(n_clusters=best_k, random_state=42, n_init=10)
+df.loc[idx_valid, 'Cluster_KMeans'] = kmeans.fit_predict(X)
+
+farben = ['steelblue', 'tomato', 'green', 'orange', 'purple']
+fig, ax = plt.subplots(figsize=(9, 6))
+for cid in range(best_k):
+    mask = df.loc[idx_valid, 'Cluster_KMeans'] == cid
+    ax.scatter(X_pca[mask, 0], X_pca[mask, 1],
+               color=farben[cid], s=90,
+               edgecolors='white', linewidth=0.6,
+               label=f'Cluster {int(cid)}')
+ax.set_xlabel(f'PC1 ({var_expl[0]:.1%})')
+ax.set_ylabel(f'PC2 ({var_expl[1]:.1%})')
+ax.set_title(f'K-Means (k={best_k}) — PCA Projektion')
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+print('Cluster-Profil:')
+display(
+    df.groupby('Cluster_KMeans')[
+        [VB_LAENGS, VB_QUER, COL_ANFANG,
+         'Drift_Paste_imp', 'Walze_norm']
+    ].agg(['mean', 'std']).round(2)
+)
+
+
+
+
+
+
+
+
+
+# k-Distanz Plot → optimales eps
+k_dist = 4
+nbrs = NearestNeighbors(n_neighbors=k_dist).fit(X)
+distances, _ = nbrs.kneighbors(X)
+distances = np.sort(distances[:, k_dist - 1])
+
+fig, ax = plt.subplots(figsize=(9, 4))
+ax.plot(distances, color='steelblue', linewidth=2)
+ax.set_xlabel('FAUFs (sortiert)')
+ax.set_ylabel(f'{k_dist}-Nachbar Distanz')
+ax.set_title('k-Distanz Plot — Knick = optimales eps')
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+# eps am Knick ablesen und anpassen
+eps_optimal = 2.5
+
+db = DBSCAN(eps=eps_optimal, min_samples=3)
+df.loc[idx_valid, 'Cluster_DBSCAN'] = db.fit_predict(X)
+n_out = (df['Cluster_DBSCAN'] == -1).sum()
+
+fig, ax = plt.subplots(figsize=(9, 6))
+colors = ['red' if l == -1 else 'steelblue'
+          for l in df.loc[idx_valid, 'Cluster_DBSCAN']]
+ax.scatter(X_pca[:, 0], X_pca[:, 1], c=colors,
+           s=90, edgecolors='white', linewidth=0.6)
+ax.set_xlabel(f'PC1 ({var_expl[0]:.1%})')
+ax.set_ylabel(f'PC2 ({var_expl[1]:.1%})')
+ax.set_title(f'DBSCAN (eps={eps_optimal}) — {n_out} Ausreißer (rot)')
+ax.legend(handles=[
+    Patch(color='steelblue', label='Normal'),
+    Patch(color='red', label=f'Ausreißer n={n_out}')
+])
+plt.tight_layout()
+plt.show()
+
+print(f'DBSCAN Ausreißer (n={n_out}):')
+display(
+    df[df['Cluster_DBSCAN'] == -1][
+        [COL_FAUF, 'Rezept_norm', 'Schaum_norm', 'Walze_norm',
+         VB_LAENGS, VB_QUER, 'Drift_Paste_imp']
+    ].reset_index(drop=True)
+)
+
+
+
+
+
+
+
+
+
+
+
 rf_features = [
     COL_ANFANG, 'Drift_Paste_imp', 'Drift_abs_imp', 'Hat_Satzende',
     COL_WECHSEL + '_enc', COL_FRISCH + '_enc',
 ] + walze_cols + schaum_cols + rezept_cols
-
 rf_features = [c for c in rf_features if c in df.columns]
-
-print(f'RF Features gesamt: {len(rf_features)}')
 
 fig, axes = plt.subplots(1, 2, figsize=(16, 8))
 
@@ -188,11 +233,8 @@ for ax, target, color in zip(axes, [VB_LAENGS, VB_QUER],
     y_rf = df.loc[mask, target]
 
     rf = RandomForestRegressor(
-        n_estimators=300,
-        max_depth=3,
-        min_samples_leaf=5,
-        random_state=42,
-        n_jobs=-1
+        n_estimators=300, max_depth=3,
+        min_samples_leaf=5, random_state=42, n_jobs=-1
     )
     rf.fit(X_rf, y_rf)
 
@@ -200,12 +242,11 @@ for ax, target, color in zip(axes, [VB_LAENGS, VB_QUER],
     cv_mae = cross_val_score(rf, X_rf, y_rf, cv=3,
                              scoring='neg_mean_absolute_error')
 
-    # Top 10 Features anzeigen (OHE hat viele Spalten)
-    imp = pd.Series(rf.feature_importances_, index=rf_features)
+    imp     = pd.Series(rf.feature_importances_, index=rf_features)
     imp_top = imp.sort_values(ascending=False).head(10).sort_values()
+    bar_colors = [color if v > imp_top.quantile(0.6)
+                  else '#cccccc' for v in imp_top]
 
-    bar_colors = [color if v > imp_top.quantile(0.6) else '#cccccc'
-                  for v in imp_top]
     ax.barh(imp_top.index, imp_top.values,
             color=bar_colors, edgecolor='white')
     ax.set_title(f'{target}\n'
@@ -215,12 +256,69 @@ for ax, target, color in zip(axes, [VB_LAENGS, VB_QUER],
     ax.grid(True, alpha=0.3, axis='x')
 
     print(f'\n{target}')
-    print(f'  R²  (3-fold CV): {cv_r2.mean():.3f} ± {cv_r2.std():.3f}')
-    print(f'  MAE (3-fold CV): {-cv_mae.mean():.1f} N')
-    print(f'  Top 5 Features:')
+    print(f'  R²  (3-fold): {cv_r2.mean():.3f} ± {cv_r2.std():.3f}')
+    print(f'  MAE (3-fold): {-cv_mae.mean():.1f} N')
+    print(f'  Top 5:')
     for feat, val in imp.sort_values(ascending=False).head(5).items():
         print(f'    {feat}: {val:.3f}')
 
 plt.tight_layout()
 plt.show()
 
+
+
+
+
+
+
+# ══════════════════════════════════════════════════════════════
+# ERKENNTNISSE:
+# 1. Kaschierpastenauftrag Satzanfang → wichtigster Parameter
+#    für VB quer (0.677) — mehr Paste = bessere Querhaftung
+# 2. Walze R11/04 → wichtigster Parameter für VB längs (0.33)
+#    bestimmte Walzen beeinflussen Längshaftung stark
+# 3. Schaumpastenrezeptur → Einfluss auf beide Richtungen
+# 4. VB längs ≠ VB quer — unterschiedliche Ursachen
+#    längs: mechanisch (Walze + Rezept)
+#    quer:  mengengetrieben (Pastenauftrag + Drift)
+# 5. 7 Z-Score Ausreißer — alle mit HOHER Haftung (positiv)
+# 6. 9 DBSCAN Anomalien — prozessseitig auffällig
+# ══════════════════════════════════════════════════════════════
+
+df_final = df.copy()
+df_final['Status'] = 'Normal'
+df_final.loc[
+    (df_final[VB_LAENGS + '_z'].abs() > 2) |
+    (df_final[VB_QUER   + '_z'].abs() > 2), 'Status'
+] = '⚠ Z-Score Ausreißer'
+df_final.loc[df_final['Cluster_DBSCAN'] == -1, 'Status'] = '🔴 DBSCAN Anomalie'
+df_final['Cluster_Bezeichnung'] = df_final['Cluster_KMeans'].map(
+    {0: 'Normalbetrieb', 1: 'Hochhaftung'}
+)
+
+print("=" * 65)
+print("VERBUNDHAFTUNG — FINALE ZUSAMMENFASSUNG")
+print("=" * 65)
+print(f"\n📊 FAUFs gesamt: {len(df_final)}")
+print(f"⚠️  Z-Score Ausreißer:  {(df_final['Status'] == '⚠ Z-Score Ausreißer').sum()}")
+print(f"🔴 DBSCAN Anomalien:   {(df_final['Status'] == '🔴 DBSCAN Anomalie').sum()}")
+print(f"✅ Normale FAUFs:      {(df_final['Status'] == 'Normal').sum()}")
+
+print('\nCluster-Profil:')
+display(df_final.groupby('Cluster_Bezeichnung')[
+    [VB_LAENGS, VB_QUER, COL_ANFANG, 'Drift_Paste_imp']
+].mean().round(2))
+
+export_cols = [
+    COL_FAUF, 'Rezept_norm', 'Schaum_norm', 'Walze_norm',
+    COL_ANFANG, COL_ENDE, 'Drift_Paste',
+    COL_WECHSEL + '_enc', COL_FRISCH + '_enc',
+    VB_LAENGS, VB_QUER,
+    VB_LAENGS + '_z', VB_QUER + '_z',
+    'Cluster_KMeans', 'Cluster_DBSCAN',
+    'Cluster_Bezeichnung', 'Status'
+]
+export_cols = [c for c in export_cols if c in df_final.columns]
+df_final[export_cols].to_excel('verbundhaftung_ergebnis.xlsx', index=False)
+print('\n✅ Export: verbundhaftung_ergebnis.xlsx')
+display(df_final[export_cols].sort_values('Status').reset_index(drop=True))
