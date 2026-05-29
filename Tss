@@ -1,169 +1,3 @@
-for col in [VB_LAENGS, VB_QUER]:
-    df[col + '_z'] = stats.zscore(df[col].fillna(df[col].mean()))
-
-ausreisser = df[
-    (df[VB_LAENGS + '_z'].abs() > 2) |
-    (df[VB_QUER   + '_z'].abs() > 2)
-]
-print(f'Ausreißer (|Z| > 2): {len(ausreisser)} FAUFs\n')
-
-fig, axes = plt.subplots(1, 2, figsize=(14, 4))
-for ax, col, c in zip(axes, [VB_LAENGS, VB_QUER], ['steelblue', 'tomato']):
-    ax.hist(df[col + '_z'].dropna(), bins=20,
-            color=c, alpha=0.8, edgecolor='white')
-    ax.axvline( 2, color='red', linestyle='--', linewidth=1.5, label='±2σ')
-    ax.axvline(-2, color='red', linestyle='--', linewidth=1.5)
-    ax.set_title(f'Z-Score — {col}')
-    ax.set_xlabel('Z-Score')
-    ax.set_ylabel('Anzahl FAUFs')
-    ax.legend()
-plt.tight_layout()
-plt.show()
-
-display(ausreisser[[COL_FAUF, COL_REZEPT, COL_SCHAUM,
-                    VB_LAENGS, VB_QUER, 'Drift_Paste_imp']]
-        .reset_index(drop=True))
-
-
-
-
-
-
-
-
-
-
-num_cols = [
-    COL_ANFANG, 'Drift_Paste_imp', 'Drift_abs_imp', 'Hat_Satzende',
-    COL_WECHSEL + '_enc', COL_FRISCH + '_enc',
-    VB_LAENGS, VB_QUER
-]
-num_cols = [c for c in num_cols if c in df.columns]
-corr     = df[num_cols].corr()
-
-fig, ax = plt.subplots(figsize=(11, 8))
-sns.heatmap(corr, annot=True, fmt='.2f', cmap='RdYlGn',
-            center=0, linewidths=0.5, ax=ax, annot_kws={'size': 10})
-ax.set_title('Korrelationsmatrix — Prozessparameter vs. Verbundhaftung',
-             fontsize=13, pad=12)
-plt.tight_layout()
-plt.show()
-
-print('Top Korrelationen mit VB längs:')
-print(corr[VB_LAENGS].drop(VB_LAENGS)
-      .sort_values(key=abs, ascending=False).round(3))
-print('\nTop Korrelationen mit VB quer:')
-print(corr[VB_QUER].drop(VB_QUER)
-      .sort_values(key=abs, ascending=False).round(3))
-
-
-
-
-
-
-
-cluster_features = [
-    COL_ANFANG, 'Drift_Paste_imp', 'Drift_abs_imp', 'Hat_Satzende',
-    COL_WECHSEL + '_enc', COL_FRISCH + '_enc',
-    VB_LAENGS, VB_QUER
-] + walze_cols + schaum_cols + rezept_cols
-
-cluster_features = [c for c in cluster_features if c in df.columns]
-
-df_c      = df[cluster_features].dropna()
-idx_valid = df_c.index
-
-X        = StandardScaler().fit_transform(df_c)
-pca      = PCA(n_components=2)
-X_pca    = pca.fit_transform(X)
-var_expl = pca.explained_variance_ratio_
-
-print(f'Gültige FAUFs:   {len(df_c)} von {len(df)}')
-print(f'Anzahl Features: {len(cluster_features)}')
-print(f'  davon OHE:     {len(walze_cols+schaum_cols+rezept_cols)}')
-print(f'PCA: PC1={var_expl[0]:.1%}, PC2={var_expl[1]:.1%}, '
-      f'Gesamt={sum(var_expl):.1%}')
-
-
-
-
-
-
-
-inertias, sil_scores = [], []
-K_range = range(2, 9)
-
-for k in K_range:
-    km = KMeans(n_clusters=k, random_state=42, n_init=10)
-    km.fit(X)
-    inertias.append(km.inertia_)
-    sil_scores.append(silhouette_score(X, km.labels_))
-
-best_k = list(K_range)[np.argmax(sil_scores)]
-
-fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-axes[0].plot(K_range, inertias, 'bo-', markersize=8)
-axes[0].set_xlabel('k')
-axes[0].set_ylabel('Inertia')
-axes[0].set_title('Elbow-Methode')
-axes[0].grid(True, alpha=0.3)
-
-axes[1].plot(K_range, sil_scores, 'rs-', markersize=8)
-axes[1].axvline(best_k, color='green', linestyle='--',
-                label=f'Optimales k={best_k}')
-axes[1].set_xlabel('k')
-axes[1].set_ylabel('Silhouette Score')
-axes[1].set_title('Silhouette Score (höher = besser)')
-axes[1].legend()
-axes[1].grid(True, alpha=0.3)
-
-plt.tight_layout()
-plt.show()
-print(f'✅ Optimales k = {best_k}')
-
-
-
-
-
-
-
-
-
-kmeans = KMeans(n_clusters=best_k, random_state=42, n_init=10)
-df.loc[idx_valid, 'Cluster_KMeans'] = kmeans.fit_predict(X)
-
-farben = ['steelblue', 'tomato', 'green', 'orange', 'purple']
-fig, ax = plt.subplots(figsize=(9, 6))
-for cid in range(best_k):
-    mask = df.loc[idx_valid, 'Cluster_KMeans'] == cid
-    ax.scatter(X_pca[mask, 0], X_pca[mask, 1],
-               color=farben[cid], s=90,
-               edgecolors='white', linewidth=0.6,
-               label=f'Cluster {int(cid)}')
-ax.set_xlabel(f'PC1 ({var_expl[0]:.1%})')
-ax.set_ylabel(f'PC2 ({var_expl[1]:.1%})')
-ax.set_title(f'K-Means (k={best_k}) — PCA Projektion')
-ax.legend()
-plt.tight_layout()
-plt.show()
-
-print('Cluster-Profil:')
-display(
-    df.groupby('Cluster_KMeans')[
-        [VB_LAENGS, VB_QUER, COL_ANFANG,
-         'Drift_Paste_imp', 'Walze_norm']
-    ].agg(['mean', 'std']).round(2)
-)
-
-
-
-
-
-
-
-
-
-# k-Distanz Plot → optimales eps
 k_dist = 4
 nbrs = NearestNeighbors(n_neighbors=k_dist).fit(X)
 distances, _ = nbrs.kneighbors(X)
@@ -178,8 +12,7 @@ ax.grid(True, alpha=0.3)
 plt.tight_layout()
 plt.show()
 
-# eps am Knick ablesen und anpassen
-eps_optimal = 2.5
+eps_optimal = 2.5  # ← nach Plot anpassen
 
 db = DBSCAN(eps=eps_optimal, min_samples=3)
 df.loc[idx_valid, 'Cluster_DBSCAN'] = db.fit_predict(X)
@@ -195,24 +28,7 @@ ax.set_ylabel(f'PC2 ({var_expl[1]:.1%})')
 ax.set_title(f'DBSCAN (eps={eps_optimal}) — {n_out} Ausreißer (rot)')
 ax.legend(handles=[
     Patch(color='steelblue', label='Normal'),
-    Patch(color='red', label=f'Ausreißer n={n_out}')
-])
-plt.tight_layout()
-plt.show()
-
-print(f'DBSCAN Ausreißer (n={n_out}):')
-display(
-    df[df['Cluster_DBSCAN'] == -1][
-        [COL_FAUF, 'Rezept_norm', 'Schaum_norm', 'Walze_norm',
-         VB_LAENGS, VB_QUER, 'Drift_Paste_imp']
-    ].reset_index(drop=True)
-)
-
-
-
-
-
-
+    Patch(color='red', label=f'Ausreißer n={n_out}
 
 
 
@@ -286,28 +102,43 @@ plt.show()
 # ══════════════════════════════════════════════════════════════
 
 df_final = df.copy()
+
 df_final['Status'] = 'Normal'
 df_final.loc[
     (df_final[VB_LAENGS + '_z'].abs() > 2) |
-    (df_final[VB_QUER   + '_z'].abs() > 2), 'Status'
+    (df_final[VB_QUER   + '_z'].abs() > 2),
+    'Status'
 ] = '⚠ Z-Score Ausreißer'
-df_final.loc[df_final['Cluster_DBSCAN'] == -1, 'Status'] = '🔴 DBSCAN Anomalie'
+df_final.loc[
+    df_final['Cluster_DBSCAN'] == -1,
+    'Status'
+] = '🔴 DBSCAN Anomalie'
+
+cluster_labels = {i: f'Cluster {i}' for i in range(best_k)}
+cluster_labels[df_final.groupby('Cluster_KMeans')[VB_LAENGS]
+               .mean().idxmax()] = 'Hochhaftung'
+cluster_labels[df_final.groupby('Cluster_KMeans')[VB_LAENGS]
+               .mean().idxmin()] = 'Normalbetrieb'
 df_final['Cluster_Bezeichnung'] = df_final['Cluster_KMeans'].map(
-    {0: 'Normalbetrieb', 1: 'Hochhaftung'}
-)
+    cluster_labels)
 
 print("=" * 65)
 print("VERBUNDHAFTUNG — FINALE ZUSAMMENFASSUNG")
 print("=" * 65)
-print(f"\n📊 FAUFs gesamt: {len(df_final)}")
-print(f"⚠️  Z-Score Ausreißer:  {(df_final['Status'] == '⚠ Z-Score Ausreißer').sum()}")
-print(f"🔴 DBSCAN Anomalien:   {(df_final['Status'] == '🔴 DBSCAN Anomalie').sum()}")
-print(f"✅ Normale FAUFs:      {(df_final['Status'] == 'Normal').sum()}")
+print(f"\n📊 FAUFs gesamt:       {len(df_final)}")
+print(f"⚠️  Z-Score Ausreißer:  "
+      f"{(df_final['Status'] == '⚠ Z-Score Ausreißer').sum()}")
+print(f"🔴 DBSCAN Anomalien:   "
+      f"{(df_final['Status'] == '🔴 DBSCAN Anomalie').sum()}")
+print(f"✅ Normale FAUFs:      "
+      f"{(df_final['Status'] == 'Normal').sum()}")
 
 print('\nCluster-Profil:')
-display(df_final.groupby('Cluster_Bezeichnung')[
-    [VB_LAENGS, VB_QUER, COL_ANFANG, 'Drift_Paste_imp']
-].mean().round(2))
+display(
+    df_final.groupby('Cluster_Bezeichnung')[
+        [VB_LAENGS, VB_QUER, COL_ANFANG, 'Drift_Paste_imp']
+    ].mean().round(2)
+)
 
 export_cols = [
     COL_FAUF, 'Rezept_norm', 'Schaum_norm', 'Walze_norm',
@@ -315,44 +146,14 @@ export_cols = [
     COL_WECHSEL + '_enc', COL_FRISCH + '_enc',
     VB_LAENGS, VB_QUER,
     VB_LAENGS + '_z', VB_QUER + '_z',
-    'Cluster_KMeans', 'Cluster_DBSCAN',
-    'Cluster_Bezeichnung', 'Status'
+    'Cluster_KMeans', 'Cluster_Bezeichnung',
+    'Cluster_DBSCAN', 'Status'
 ]
 export_cols = [c for c in export_cols if c in df_final.columns]
 df_final[export_cols].to_excel('verbundhaftung_ergebnis.xlsx', index=False)
 print('\n✅ Export: verbundhaftung_ergebnis.xlsx')
-display(df_final[export_cols].sort_values('Status').reset_index(drop=True))
-
-
-
-
-
-kmeans = KMeans(n_clusters=best_k, random_state=42, n_init=10)
-df.loc[idx_valid, 'Cluster_KMeans'] = kmeans.fit_predict(X)
-
-# Colormap statt fixer Liste → funktioniert für beliebiges k
-cmap   = plt.cm.get_cmap('tab10', best_k)
-farben = [cmap(i) for i in range(best_k)]
-
-fig, ax = plt.subplots(figsize=(9, 6))
-for cid in range(best_k):
-    mask = df.loc[idx_valid, 'Cluster_KMeans'] == cid
-    ax.scatter(
-        X_pca[mask, 0], X_pca[mask, 1],
-        color=farben[cid], s=90,
-        edgecolors='white', linewidth=0.6,
-        label=f'Cluster {int(cid)}'
-    )
-ax.set_xlabel(f'PC1 ({var_expl[0]:.1%})')
-ax.set_ylabel(f'PC2 ({var_expl[1]:.1%})')
-ax.set_title(f'K-Means (k={best_k}) — PCA Projektion')
-ax.legend()
-plt.tight_layout()
-plt.show()
-
-print('Cluster-Profil:')
 display(
-    df.groupby('Cluster_KMeans')[
-        [VB_LAENGS, VB_QUER, COL_ANFANG, 'Drift_Paste_imp']
-    ].agg(['mean', 'std']).round(2)
+    df_final[export_cols]
+    .sort_values('Status')
+    .reset_index(drop=True)
 )
