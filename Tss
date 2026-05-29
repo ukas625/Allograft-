@@ -271,13 +271,54 @@ plt.show()
 
 
 
+# ── 0. 999 Sentinel im Rohdaten VOR Pivot entfernen ──────────
+result[COL_WERT] = result[COL_WERT].replace(999, np.nan).replace(999.0, np.nan)
 
-# ── 999 Sentinel-Werte entfernen ──────────────────────────────
+# ── 1. Pivot: Long → Wide ─────────────────────────────────────
+pivot = result.pivot_table(
+    index=COL_FAUF,
+    columns=COL_MERKMAL,
+    values=COL_WERT,
+    aggfunc='mean'
+).reset_index()
+pivot.columns.name = None
+
+# ── 2. Produktionsparameter 1× pro FAUF ──────────────────────
+param_cols = [COL_FAUF, COL_REZEPT, COL_ANFANG, COL_ENDE,
+              COL_SCHAUM, COL_WALZE, COL_WECHSEL, COL_FRISCH]
+param_cols = [c for c in param_cols if c in result.columns]
+
+params = result[param_cols].drop_duplicates(subset=COL_FAUF)
+df     = pd.merge(params, pivot, on=COL_FAUF, how='inner')
+
+# ── 3. Plausibilitätsfilter: Verbundhaftung > 300 N unmöglich ─
 for col in [VB_LAENGS, VB_QUER]:
     if col in df.columns:
-        df[col] = df[col].replace(999, np.nan)
-        df[col] = df[col].replace(999.0, np.nan)
+        df[col] = df[col].where(df[col] <= 300, np.nan)
 
-# Kontrolle
-print("Nach Bereinigung:")
-print(df[[VB_LAENGS, VB_QUER]].describe().round(2))
+# ── 4. Feature Engineering ────────────────────────────────────
+df['Drift_Paste']   = df[COL_ANFANG] - df[COL_ENDE]
+df['Drift_abs']     = df['Drift_Paste'].abs()
+df['Rezept_Gruppe'] = df[COL_REZEPT].str.extract(r'(P\d{4}|S\d{4})')
+
+for col in [COL_WECHSEL, COL_FRISCH]:
+    if col in df.columns:
+        df[col + '_enc'] = (
+            df[col].str.strip().str.lower()
+            .map({'ja': 1, 'j': 1, 'nein': 0, 'n': 0})
+            .fillna(0).astype(int)
+        )
+
+# Schaumpastenrezeptur encodieren
+if COL_SCHAUM in df.columns:
+    df['Schaum_enc'] = LabelEncoder().fit_transform(
+        df[COL_SCHAUM].fillna('Unbekannt')
+    )
+
+# ── 5. Kontrolle ──────────────────────────────────────────────
+print(f'Shape: {df.shape}  |  FAUFs: {df[COL_FAUF].nunique()}')
+print(f'\nFehlende Werte:')
+print(df[[COL_ANFANG, COL_ENDE, 'Drift_Paste',
+          VB_LAENGS, VB_QUER]].isna().sum())
+print()
+df[[COL_ANFANG, COL_ENDE, 'Drift_Paste', VB_LAENGS, VB_QUER]].describe().round(2)
