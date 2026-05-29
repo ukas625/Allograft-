@@ -328,3 +328,31 @@ df[[COL_ANFANG, COL_ENDE, 'Drift_Paste', VB_LAENGS, VB_QUER]].describe().round(2
 df['Drift_Paste_imp'] = df['Drift_Paste'].fillna(0)
 df['Drift_abs_imp']   = df['Drift_abs'].fillna(0)
 df['Hat_Satzende']    = df[COL_ENDE].notna().astype(int)  # Flag ob Satzende überhaupt erfasst wurde
+
+
+
+
+
+num_cols = [
+    COL_ANFANG, 'Drift_Paste_imp', 'Drift_abs_imp', 'Hat_Satzende',
+    COL_WECHSEL + '_enc', COL_FRISCH + '_enc', 'Schaum_enc',
+    VB_LAENGS, VB_QUER
+]
+num_cols = [c for c in num_cols if c in df.columns]
+
+corr = df[num_cols].corr()
+
+fig, ax = plt.subplots(figsize=(11, 8))
+sns.heatmap(
+    corr, annot=True, fmt='.2f', cmap='RdYlGn',
+    center=0, linewidths=0.5, ax=ax, annot_kws={'size': 10}
+)
+ax.set_title('Korrelationsmatrix — Prozessparameter vs. Verbundhaftung',
+             fontsize=13, pad=12)
+plt.tight_layout()
+plt.show()
+
+print('\nTop Korrelationen mit Verbundhaftung / längs:')
+print(corr[VB_LAENGS].drop(VB_LAENGS).sort_values(key=abs, ascending=False).round(3))
+print('\nTop Korrelationen mit Verbundhaftung / quer:')
+print(corr[VB_QUER].drop(VB_QUER).sort_values(key=abs, ascending=False).round(3))
