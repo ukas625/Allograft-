@@ -21,7 +21,8 @@ plt.tight_layout()
 plt.show()
 
 display(ausreisser[[COL_FAUF, COL_REZEPT, COL_SCHAUM,
-                    V
+                    VB_LAENGS, VB_QUER, 'Drift_Paste_imp']]
+        .reset_index(drop=True))
 
 
 
