@@ -1,32 +1,226 @@
-print("=" * 60)
-print("DIAGNOSE — KATEGORISCHE SPALTEN")
-print("=" * 60)
+import re
 
-# ── Ja/Nein Spalten ───────────────────────────────────────────
+# ── 0. 999 Sentinel VOR Pivot entfernen ──────────────────────
+result[COL_WERT] = result[COL_WERT].replace(999, np.nan).replace(999.0, np.nan)
+
+# ── 1. Pivot Long → Wide ──────────────────────────────────────
+pivot = result.pivot_table(
+    index=COL_FAUF,
+    columns=COL_MERKMAL,
+    values=COL_WERT,
+    aggfunc='mean'
+).reset_index()
+pivot.columns.name = None
+
+# ── 2. Produktionsparameter 1× pro FAUF ──────────────────────
+param_cols = [COL_FAUF, COL_REZEPT, COL_ANFANG, COL_ENDE,
+              COL_SCHAUM, COL_WALZE, COL_WECHSEL, COL_FRISCH]
+param_cols  = [c for c in param_cols if c in result.columns]
+params      = result[param_cols].drop_duplicates(subset=COL_FAUF)
+df          = pd.merge(params, pivot, on=COL_FAUF, how='inner')
+
+# ── 3. Plausibilitätsfilter ───────────────────────────────────
+for col in [VB_LAENGS, VB_QUER]:
+    if col in df.columns:
+        df[col] = df[col].where(df[col] <= 300, np.nan)
+
+# ── 4. Numerische Features ────────────────────────────────────
+df['Drift_Paste']     = df[COL_ANFANG] - df[COL_ENDE]
+df['Drift_abs']       = df['Drift_Paste'].abs()
+df['Drift_Paste_imp'] = df['Drift_Paste'].fillna(0)
+df['Drift_abs_imp']   = df['Drift_abs'].fillna(0)
+df['Hat_Satzende']    = df[COL_ENDE].notna().astype(int)
+
+# ── 5. Ja/Nein Encoding ───────────────────────────────────────
+# Varianten: Ja, ja, j, J, Nein, nein, n, N, NaN
 for col in [COL_WECHSEL, COL_FRISCH]:
-    if col in result.columns:
-        print(f"\n📋 {col}:")
-        print(result[col].value_counts(dropna=False).to_string())
+    if col in df.columns:
+        df[col + '_enc'] = (
+            df[col].astype(str).str.strip().str.lower()
+            .map({'ja': 1, 'j': 1, 'nein': 0, 'n': 0, 'nan': 0})
+            .fillna(0).astype(int)
+        )
 
-# ── Schaumpastenrezeptur ──────────────────────────────────────
-if COL_SCHAUM in result.columns:
-    vals = result[COL_SCHAUM].value_counts(dropna=False)
-    print(f"\n🧴 Schaumpastenrezeptur ({vals.shape[0]} unique):")
-    print(vals.to_string())
+# ── 6. Walzenbezeichnung normalisieren ────────────────────────
+# R07/02 = R 07/02 = R7/02 = ro7 o2 = Ro7/02
+# R11/04 = R 11/04
+def normalize_walze(w):
+    if pd.isna(w):
+        return 'Unbekannt'
+    w = str(w).strip().upper()
+    w = w.replace(' ', '')
+    w = w.replace('RO', 'R0')
+    w = re.sub(r'^R(\d)/', r'R0\1/', w)
+    return w
 
-# ── Walzenbezeichnung ─────────────────────────────────────────
-if COL_WALZE in result.columns:
-    vals = result[COL_WALZE].value_counts(dropna=False)
-    print(f"\n🔧 Walzenbezeichnung ({vals.shape[0]} unique):")
-    print(vals.to_string())
+df['Walze_norm'] = df[COL_WALZE].apply(normalize_walze)
+walze_ohe  = pd.get_dummies(df['Walze_norm'], prefix='Walze')
+df         = pd.concat([df, walze_ohe], axis=1)
+walze_cols = list(walze_ohe.columns)
 
-# ── Kaschierpastenrezeptur ────────────────────────────────────
-if COL_REZEPT in result.columns:
-    vals = result[COL_REZEPT].value_counts(dropna=False)
-    print(f"\n🎨 Kaschierpastenrezeptur ({vals.shape[0]} unique):")
-    print(vals.to_string())
+# ── 7. Schaumpastenrezeptur normalisieren ─────────────────────
+# T28 55 m10 = T28/55/M10 = T28/55/m10
+def normalize_schaum(s):
+    if pd.isna(s):
+        return 'Unbekannt'
+    s = str(s).strip().upper()
+    s = re.sub(r'\s+', '/', s)
+    s = re.sub(r'-{2,}', '--', s)
+    s = re.sub(r'/{2,}', '/', s)
+    return s
 
-print("\n" + "=" * 60)
-print("WICHTIG: result DataFrame nutzen (vor Pivot)")
-print("weil dort noch alle Zeilen vorhanden sind")
-print("=" * 60)
+df['Schaum_norm']  = df[COL_SCHAUM].apply(normalize_schaum)
+schaum_counts      = df['Schaum_norm'].value_counts()
+top_schaum         = schaum_counts[schaum_counts >= 5].index
+df['Schaum_clean'] = df['Schaum_norm'].where(
+    df['Schaum_norm'].isin(top_schaum), other='Sonstige'
+)
+schaum_ohe  = pd.get_dummies(df['Schaum_clean'], prefix='Schaum')
+df          = pd.concat([df, schaum_ohe], axis=1)
+schaum_cols = list(schaum_ohe.columns)
+
+# ── 8. Kaschierpastenrezeptur normalisieren ───────────────────
+# P5582/85/91 = 5582/85/91 = 5582 85 91
+def normalize_rezept(r):
+    if pd.isna(r):
+        return 'Unbekannt'
+    r = str(r).strip().upper()
+    r = re.sub(r'^P', '', r)
+    r = re.sub(r'\s+', '/', r)
+    r = re.sub(r'/{2,}', '/', r)
+    return r
+
+df['Rezept_norm']  = df[COL_REZEPT].apply(normalize_rezept)
+rezept_counts      = df['Rezept_norm'].value_counts()
+top_rezept         = rezept_counts[rezept_counts >= 3].index
+df['Rezept_clean'] = df['Rezept_norm'].where(
+    df['Rezept_norm'].isin(top_rezept), other='Sonstige'
+)
+rezept_ohe  = pd.get_dummies(df['Rezept_clean'], prefix='Rezept')
+df          = pd.concat([df, rezept_ohe], axis=1)
+rezept_cols = list(rezept_ohe.columns)
+
+# ── 9. Kontrolle ──────────────────────────────────────────────
+print(f'Shape: {df.shape}  |  FAUFs: {df[COL_FAUF].nunique()}')
+print(f'\nFehlende Werte:')
+print(df[[COL_ANFANG, COL_ENDE, 'Drift_Paste',
+          VB_LAENGS, VB_QUER]].isna().sum())
+
+print(f"""
+╔══════════════════════════════════════════╗
+  OHE ZUSAMMENFASSUNG
+  Walze:         {len(walze_cols):>3} Spalten → {list(df['Walze_norm'].unique())}
+  Schaum:        {len(schaum_cols):>3} Spalten
+  Kaschierpaste: {len(rezept_cols):>3} Spalten
+  ──────────────────────────────────────────
+  Gesamt neu:    {len(walze_cols+schaum_cols+rezept_cols):>3} Spalten
+╚══════════════════════════════════════════╝
+""")
+
+print('\nWalze nach Normalisierung:')
+print(df['Walze_norm'].value_counts().to_string())
+print('\nSchaum Top 10 nach Normalisierung:')
+print(df['Schaum_clean'].value_counts().head(10).to_string())
+print('\nRezept Top 10 nach Normalisierung:')
+print(df['Rezept_clean'].value_counts().head(10).to_string())
+
+df[[COL_ANFANG, COL_ENDE, 'Drift_Paste',
+    VB_LAENGS, VB_QUER]].describe().round(2)
+
+
+
+
+
+
+
+
+# OHE Features für Clustering
+# Numerische + binäre + OHE kategorische Features
+cluster_features = [
+    # Numerisch
+    COL_ANFANG, 'Drift_Paste_imp', 'Drift_abs_imp', 'Hat_Satzende',
+    # Binär (ja/nein bereits korrekt)
+    COL_WECHSEL + '_enc', COL_FRISCH + '_enc',
+    # Zielgrößen
+    VB_LAENGS, VB_QUER
+] + walze_cols + schaum_cols + rezept_cols
+
+cluster_features = [c for c in cluster_features if c in df.columns]
+
+df_c      = df[cluster_features].dropna()
+idx_valid = df_c.index
+
+X        = StandardScaler().fit_transform(df_c)
+pca      = PCA(n_components=2)
+X_pca    = pca.fit_transform(X)
+var_expl = pca.explained_variance_ratio_
+
+print(f'Gültige FAUFs:    {len(df_c)} von {len(df)}')
+print(f'Anzahl Features:  {len(cluster_features)}')
+print(f'  davon OHE:      {len(walze_cols+schaum_cols+rezept_cols)}')
+print(f'PCA: PC1={var_expl[0]:.1%}, PC2={var_expl[1]:.1%}, '
+      f'Gesamt={sum(var_expl):.1%}')
+
+
+
+
+
+
+
+
+
+# Für RF: OHE Features (konsistent mit Clustering)
+rf_features = [
+    COL_ANFANG, 'Drift_Paste_imp', 'Drift_abs_imp', 'Hat_Satzende',
+    COL_WECHSEL + '_enc', COL_FRISCH + '_enc',
+] + walze_cols + schaum_cols + rezept_cols
+
+rf_features = [c for c in rf_features if c in df.columns]
+
+print(f'RF Features gesamt: {len(rf_features)}')
+
+fig, axes = plt.subplots(1, 2, figsize=(16, 8))
+
+for ax, target, color in zip(axes, [VB_LAENGS, VB_QUER],
+                              ['steelblue', 'tomato']):
+    mask = df[rf_features + [target]].dropna().index
+    X_rf = df.loc[mask, rf_features]
+    y_rf = df.loc[mask, target]
+
+    rf = RandomForestRegressor(
+        n_estimators=300,
+        max_depth=3,
+        min_samples_leaf=5,
+        random_state=42,
+        n_jobs=-1
+    )
+    rf.fit(X_rf, y_rf)
+
+    cv_r2  = cross_val_score(rf, X_rf, y_rf, cv=3, scoring='r2')
+    cv_mae = cross_val_score(rf, X_rf, y_rf, cv=3,
+                             scoring='neg_mean_absolute_error')
+
+    # Top 10 Features anzeigen (OHE hat viele Spalten)
+    imp = pd.Series(rf.feature_importances_, index=rf_features)
+    imp_top = imp.sort_values(ascending=False).head(10).sort_values()
+
+    bar_colors = [color if v > imp_top.quantile(0.6) else '#cccccc'
+                  for v in imp_top]
+    ax.barh(imp_top.index, imp_top.values,
+            color=bar_colors, edgecolor='white')
+    ax.set_title(f'{target}\n'
+                 f'R² CV: {cv_r2.mean():.3f} ± {cv_r2.std():.3f} | '
+                 f'MAE: {-cv_mae.mean():.1f} N')
+    ax.set_xlabel('Feature Importance')
+    ax.grid(True, alpha=0.3, axis='x')
+
+    print(f'\n{target}')
+    print(f'  R²  (3-fold CV): {cv_r2.mean():.3f} ± {cv_r2.std():.3f}')
+    print(f'  MAE (3-fold CV): {-cv_mae.mean():.1f} N')
+    print(f'  Top 5 Features:')
+    for feat, val in imp.sort_values(ascending=False).head(5).items():
+        print(f'    {feat}: {val:.3f}')
+
+plt.tight_layout()
+plt.show()
+
