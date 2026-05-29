@@ -1,3 +1,124 @@
+# ══════════════════════════════════════════════════════════════
+# WICHTIG: Clustering nur auf numerischen Features
+# OHE würde Clustering auf Rezept-Identität reduzieren
+# statt auf Prozessverhalten — das ist nicht das Ziel
+# ══════════════════════════════════════════════════════════════
+
+cluster_features = [
+    COL_ANFANG,
+    'Drift_Paste_imp',
+    'Drift_abs_imp',
+    'Hat_Satzende',
+    COL_WECHSEL + '_enc',
+    COL_FRISCH  + '_enc',
+    VB_LAENGS,
+    VB_QUER
+]
+cluster_features = [c for c in cluster_features if c in df.columns]
+
+df_c      = df[cluster_features].dropna()
+idx_valid = df_c.index
+
+X        = StandardScaler().fit_transform(df_c)
+pca      = PCA(n_components=2)
+X_pca    = pca.fit_transform(X)
+var_expl = pca.explained_variance_ratio_
+
+print(f'Gültige FAUFs:   {len(df_c)} von {len(df)}')
+print(f'Anzahl Features: {len(cluster_features)}')
+print(f'PCA: PC1={var_expl[0]:.1%}, PC2={var_expl[1]:.1%}, '
+      f'Gesamt={sum(var_expl):.1%}')
+print(f'\nFeatures:')
+for f in cluster_features:
+    print(f'  • {f}')
+
+
+
+
+
+
+
+
+
+inertias, sil_scores = [], []
+K_range = range(2, 7)
+
+for k in K_range:
+    km = KMeans(n_clusters=k, random_state=42, n_init=10)
+    km.fit(X)
+    inertias.append(km.inertia_)
+    sil_scores.append(silhouette_score(X, km.labels_))
+
+# Jetzt kein künstlicher Cap mehr nötig
+best_k = list(K_range)[np.argmax(sil_scores)]
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+axes[0].plot(K_range, inertias, 'bo-', markersize=8)
+axes[0].set_xlabel('k')
+axes[0].set_ylabel('Inertia')
+axes[0].set_title('Elbow-Methode')
+axes[0].grid(True, alpha=0.3)
+
+axes[1].plot(K_range, sil_scores, 'rs-', markersize=8)
+axes[1].axvline(best_k, color='green', linestyle='--',
+                label=f'Optimales k={best_k}')
+axes[1].set_xlabel('k')
+axes[1].set_ylabel('Silhouette Score')
+axes[1].set_title('Silhouette Score (höher = besser)')
+axes[1].legend()
+axes[1].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+print(f'✅ Optimales k = {best_k}')
+
+
+
+
+
+
+
+
+kmeans = KMeans(n_clusters=best_k, random_state=42, n_init=10)
+df.loc[idx_valid, 'Cluster_KMeans'] = kmeans.fit_predict(X)
+
+cmap   = plt.cm.get_cmap('tab10', best_k)
+farben = [cmap(i) for i in range(best_k)]
+
+fig, ax = plt.subplots(figsize=(9, 6))
+for cid in range(best_k):
+    mask = df.loc[idx_valid, 'Cluster_KMeans'] == cid
+    ax.scatter(
+        X_pca[mask, 0], X_pca[mask, 1],
+        color=farben[cid], s=90,
+        edgecolors='white', linewidth=0.6,
+        label=f'Cluster {int(cid)}'
+    )
+ax.set_xlabel(f'PC1 ({var_expl[0]:.1%})')
+ax.set_ylabel(f'PC2 ({var_expl[1]:.1%})')
+ax.set_title(f'K-Means (k={best_k}) — PCA Projektion\n'
+             f'Clustering auf Prozessverhalten (numerisch)')
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+print('Cluster-Profil:')
+display(
+    df.groupby('Cluster_KMeans')[
+        [VB_LAENGS, VB_QUER, COL_ANFANG,
+         'Drift_Paste_imp', 'Walze_norm']
+    ].agg(['mean', 'std']).round(2)
+)
+
+
+
+
+
+
+
+from matplotlib.patches import Patch
+from sklearn.neighbors import NearestNeighbors
+
 k_dist = 4
 nbrs = NearestNeighbors(n_neighbors=k_dist).fit(X)
 distances, _ = nbrs.kneighbors(X)
@@ -12,7 +133,8 @@ ax.grid(True, alpha=0.3)
 plt.tight_layout()
 plt.show()
 
-eps_optimal = 2.5  # ← nach Plot anpassen
+# Im numerischen Raum (8 Features) ist eps ~1.5-2.5 realistisch
+eps_optimal = 2.0
 
 db = DBSCAN(eps=eps_optimal, min_samples=3)
 df.loc[idx_valid, 'Cluster_DBSCAN'] = db.fit_predict(X)
@@ -39,134 +161,4 @@ display(
         [COL_FAUF, 'Rezept_norm', 'Schaum_norm', 'Walze_norm',
          VB_LAENGS, VB_QUER, 'Drift_Paste_imp']
     ].reset_index(drop=True)
-)
-
-
-
-
-
-
-
-rf_features = [
-    COL_ANFANG, 'Drift_Paste_imp', 'Drift_abs_imp', 'Hat_Satzende',
-    COL_WECHSEL + '_enc', COL_FRISCH + '_enc',
-] + walze_cols + schaum_cols + rezept_cols
-rf_features = [c for c in rf_features if c in df.columns]
-
-fig, axes = plt.subplots(1, 2, figsize=(16, 8))
-
-for ax, target, color in zip(axes, [VB_LAENGS, VB_QUER],
-                              ['steelblue', 'tomato']):
-    mask = df[rf_features + [target]].dropna().index
-    X_rf = df.loc[mask, rf_features]
-    y_rf = df.loc[mask, target]
-
-    rf = RandomForestRegressor(
-        n_estimators=300, max_depth=3,
-        min_samples_leaf=5, random_state=42, n_jobs=-1
-    )
-    rf.fit(X_rf, y_rf)
-
-    cv_r2  = cross_val_score(rf, X_rf, y_rf, cv=3, scoring='r2')
-    cv_mae = cross_val_score(rf, X_rf, y_rf, cv=3,
-                             scoring='neg_mean_absolute_error')
-
-    imp     = pd.Series(rf.feature_importances_, index=rf_features)
-    imp_top = imp.sort_values(ascending=False).head(10).sort_values()
-    bar_colors = [color if v > imp_top.quantile(0.6)
-                  else '#cccccc' for v in imp_top]
-
-    ax.barh(imp_top.index, imp_top.values,
-            color=bar_colors, edgecolor='white')
-    ax.set_title(f'{target}\n'
-                 f'R² CV: {cv_r2.mean():.3f} ± {cv_r2.std():.3f} | '
-                 f'MAE: {-cv_mae.mean():.1f} N')
-    ax.set_xlabel('Feature Importance')
-    ax.grid(True, alpha=0.3, axis='x')
-
-    print(f'\n{target}')
-    print(f'  R²  (3-fold): {cv_r2.mean():.3f} ± {cv_r2.std():.3f}')
-    print(f'  MAE (3-fold): {-cv_mae.mean():.1f} N')
-    print(f'  Top 5:')
-    for feat, val in imp.sort_values(ascending=False).head(5).items():
-        print(f'    {feat}: {val:.3f}')
-
-plt.tight_layout()
-plt.show()
-
-
-
-
-
-
-
-# ══════════════════════════════════════════════════════════════
-# ERKENNTNISSE:
-# 1. Kaschierpastenauftrag Satzanfang → wichtigster Parameter
-#    für VB quer (0.677) — mehr Paste = bessere Querhaftung
-# 2. Walze R11/04 → wichtigster Parameter für VB längs (0.33)
-#    bestimmte Walzen beeinflussen Längshaftung stark
-# 3. Schaumpastenrezeptur → Einfluss auf beide Richtungen
-# 4. VB längs ≠ VB quer — unterschiedliche Ursachen
-#    längs: mechanisch (Walze + Rezept)
-#    quer:  mengengetrieben (Pastenauftrag + Drift)
-# 5. 7 Z-Score Ausreißer — alle mit HOHER Haftung (positiv)
-# 6. 9 DBSCAN Anomalien — prozessseitig auffällig
-# ══════════════════════════════════════════════════════════════
-
-df_final = df.copy()
-
-df_final['Status'] = 'Normal'
-df_final.loc[
-    (df_final[VB_LAENGS + '_z'].abs() > 2) |
-    (df_final[VB_QUER   + '_z'].abs() > 2),
-    'Status'
-] = '⚠ Z-Score Ausreißer'
-df_final.loc[
-    df_final['Cluster_DBSCAN'] == -1,
-    'Status'
-] = '🔴 DBSCAN Anomalie'
-
-cluster_labels = {i: f'Cluster {i}' for i in range(best_k)}
-cluster_labels[df_final.groupby('Cluster_KMeans')[VB_LAENGS]
-               .mean().idxmax()] = 'Hochhaftung'
-cluster_labels[df_final.groupby('Cluster_KMeans')[VB_LAENGS]
-               .mean().idxmin()] = 'Normalbetrieb'
-df_final['Cluster_Bezeichnung'] = df_final['Cluster_KMeans'].map(
-    cluster_labels)
-
-print("=" * 65)
-print("VERBUNDHAFTUNG — FINALE ZUSAMMENFASSUNG")
-print("=" * 65)
-print(f"\n📊 FAUFs gesamt:       {len(df_final)}")
-print(f"⚠️  Z-Score Ausreißer:  "
-      f"{(df_final['Status'] == '⚠ Z-Score Ausreißer').sum()}")
-print(f"🔴 DBSCAN Anomalien:   "
-      f"{(df_final['Status'] == '🔴 DBSCAN Anomalie').sum()}")
-print(f"✅ Normale FAUFs:      "
-      f"{(df_final['Status'] == 'Normal').sum()}")
-
-print('\nCluster-Profil:')
-display(
-    df_final.groupby('Cluster_Bezeichnung')[
-        [VB_LAENGS, VB_QUER, COL_ANFANG, 'Drift_Paste_imp']
-    ].mean().round(2)
-)
-
-export_cols = [
-    COL_FAUF, 'Rezept_norm', 'Schaum_norm', 'Walze_norm',
-    COL_ANFANG, COL_ENDE, 'Drift_Paste',
-    COL_WECHSEL + '_enc', COL_FRISCH + '_enc',
-    VB_LAENGS, VB_QUER,
-    VB_LAENGS + '_z', VB_QUER + '_z',
-    'Cluster_KMeans', 'Cluster_Bezeichnung',
-    'Cluster_DBSCAN', 'Status'
-]
-export_cols = [c for c in export_cols if c in df_final.columns]
-df_final[export_cols].to_excel('verbundhaftung_ergebnis.xlsx', index=False)
-print('\n✅ Export: verbundhaftung_ergebnis.xlsx')
-display(
-    df_final[export_cols]
-    .sort_values('Status')
-    .reset_index(drop=True)
 )
