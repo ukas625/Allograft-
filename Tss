@@ -28,7 +28,20 @@ ax.set_ylabel(f'PC2 ({var_expl[1]:.1%})')
 ax.set_title(f'DBSCAN (eps={eps_optimal}) — {n_out} Ausreißer (rot)')
 ax.legend(handles=[
     Patch(color='steelblue', label='Normal'),
-    Patch(color='red', label=f'Ausreißer n={n_out}
+    Patch(color='red', label=f'Ausreißer n={n_out}')
+])
+plt.tight_layout()
+plt.show()
+
+print(f'DBSCAN Ausreißer (n={n_out}):')
+display(
+    df[df['Cluster_DBSCAN'] == -1][
+        [COL_FAUF, 'Rezept_norm', 'Schaum_norm', 'Walze_norm',
+         VB_LAENGS, VB_QUER, 'Drift_Paste_imp']
+    ].reset_index(drop=True)
+)
+
+
 
 
 
