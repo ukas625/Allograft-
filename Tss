@@ -1,36 +1,3 @@
-for col in [VB_LAENGS, VB_QUER]:
-    df[col + '_z'] = stats.zscore(df[col].fillna(df[col].mean()))
-
-ausreisser = df[
-    (df[VB_LAENGS + '_z'].abs() > 2) |
-    (df[VB_QUER   + '_z'].abs() > 2)
-]
-print(f'Ausreißer (|Z| > 2): {len(ausreisser)} FAUFs\n')
-
-fig, axes = plt.subplots(1, 2, figsize=(14, 4))
-for ax, col, c in zip(axes, [VB_LAENGS, VB_QUER], ['steelblue', 'tomato']):
-    ax.hist(df[col + '_z'].dropna(), bins=20,
-            color=c, alpha=0.8, edgecolor='white')
-    ax.axvline( 2, color='red', linestyle='--', linewidth=1.5, label='±2σ')
-    ax.axvline(-2, color='red', linestyle='--', linewidth=1.5)
-    ax.set_title(f'Z-Score — {col}')
-    ax.set_xlabel('Z-Score')
-    ax.set_ylabel('Anzahl FAUFs')
-    ax.legend()
-plt.tight_layout()
-plt.show()
-
-display(ausreisser[[COL_FAUF, COL_REZEPT, COL_SCHAUM,
-                    VB_LAENGS, VB_QUER, 'Drift_Paste_imp']]
-        .reset_index(drop=True))
-
-
-
-
-
-
-
-
 cluster_features = [
     COL_ANFANG, 'Drift_Paste_imp', 'Drift_abs_imp', 'Hat_Satzende',
     COL_WECHSEL + '_enc', COL_FRISCH + '_enc', 'Schaum_enc',
@@ -48,6 +15,7 @@ var_expl = pca.explained_variance_ratio_
 
 print(f'Gültige FAUFs: {len(df_c)} von {len(df)}')
 print(f'PCA: PC1={var_expl[0]:.1%}, PC2={var_expl[1]:.1%}, Gesamt={sum(var_expl):.1%}')
+
 
 
 
@@ -120,8 +88,6 @@ display(
 
 
 
-
-
 # k-Distanz Plot → optimales eps ablesen
 k_dist = 4
 nbrs = NearestNeighbors(n_neighbors=k_dist).fit(X)
@@ -166,7 +132,6 @@ display(
          VB_LAENGS, VB_QUER, 'Drift_Paste_imp']
     ].reset_index(drop=True)
 )
-
 
 
 
@@ -220,8 +185,6 @@ plt.show()
 
 
 
-
-
 export_cols = [
     COL_FAUF, COL_REZEPT, 'Rezept_Gruppe', COL_SCHAUM,
     COL_ANFANG, COL_ENDE, 'Drift_Paste',
@@ -235,4 +198,3 @@ export_cols = [c for c in export_cols if c in df.columns]
 df[export_cols].to_excel('verbundhaftung_ergebnis.xlsx', index=False)
 print('✅ Export: verbundhaftung_ergebnis.xlsx')
 display(df[export_cols].head(10))
-
