@@ -322,3 +322,9 @@ print(df[[COL_ANFANG, COL_ENDE, 'Drift_Paste',
           VB_LAENGS, VB_QUER]].isna().sum())
 print()
 df[[COL_ANFANG, COL_ENDE, 'Drift_Paste', VB_LAENGS, VB_QUER]].describe().round(2)
+
+# Drift nur wo vorhanden nutzen, sonst mit 0 imputen
+# (kein Drift gemessen = kein bekannter Drift)
+df['Drift_Paste_imp'] = df['Drift_Paste'].fillna(0)
+df['Drift_abs_imp']   = df['Drift_abs'].fillna(0)
+df['Hat_Satzende']    = df[COL_ENDE].notna().astype(int)  # Flag ob Satzende überhaupt erfasst wurde
