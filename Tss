@@ -322,3 +322,37 @@ export_cols = [c for c in export_cols if c in df_final.columns]
 df_final[export_cols].to_excel('verbundhaftung_ergebnis.xlsx', index=False)
 print('\n✅ Export: verbundhaftung_ergebnis.xlsx')
 display(df_final[export_cols].sort_values('Status').reset_index(drop=True))
+
+
+
+
+
+kmeans = KMeans(n_clusters=best_k, random_state=42, n_init=10)
+df.loc[idx_valid, 'Cluster_KMeans'] = kmeans.fit_predict(X)
+
+# Colormap statt fixer Liste → funktioniert für beliebiges k
+cmap   = plt.cm.get_cmap('tab10', best_k)
+farben = [cmap(i) for i in range(best_k)]
+
+fig, ax = plt.subplots(figsize=(9, 6))
+for cid in range(best_k):
+    mask = df.loc[idx_valid, 'Cluster_KMeans'] == cid
+    ax.scatter(
+        X_pca[mask, 0], X_pca[mask, 1],
+        color=farben[cid], s=90,
+        edgecolors='white', linewidth=0.6,
+        label=f'Cluster {int(cid)}'
+    )
+ax.set_xlabel(f'PC1 ({var_expl[0]:.1%})')
+ax.set_ylabel(f'PC2 ({var_expl[1]:.1%})')
+ax.set_title(f'K-Means (k={best_k}) — PCA Projektion')
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+print('Cluster-Profil:')
+display(
+    df.groupby('Cluster_KMeans')[
+        [VB_LAENGS, VB_QUER, COL_ANFANG, 'Drift_Paste_imp']
+    ].agg(['mean', 'std']).round(2)
+)
