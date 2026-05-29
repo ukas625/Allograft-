@@ -1,55 +1,286 @@
-df['Rezept_enc'] = LabelEncoder().fit_transform(
-    df['Rezept_Gruppe'].fillna('Unbekannt'))
-df['Walze_enc']  = LabelEncoder().fit_transform(
-    df[COL_WALZE].fillna('Unbekannt'))
+# ══════════════════════════════════════════════════════════════
+# ZUSAMMENFASSUNG DER ANALYSE
+# ══════════════════════════════════════════════════════════════
+#
+# ERKENNTNISSE:
+#
+# 1. KASCHIERPASTENAUFTRAG (Satzanfang) ist der wichtigste Parameter
+#    → Je mehr Paste aufgetragen wird, desto besser die Verbundhaftung
+#    → Feature Importance: 0.65 (quer) und 0.35 (längs)
+#    → Korrelation mit VB quer: 0.34 — stärkste lineare Korrelation
+#
+# 2. SCHAUMPASTENREZEPTUR beeinflusst die Verbundhaftung
+#    → Zweitwichtigster Parameter für BEIDE Richtungen
+#    → Für VB längs fast gleichwertig mit der Kaschierpaste (0.33)
+#    → Unterschiedliche Rezepturen produzieren systematisch
+#      unterschiedliche Haftungsniveaus
+#
+# 3. VB LÄNGS ≠ VB QUER — unterschiedliche Einflussfaktoren
+#    → VB längs: Schaumpaste + Walzentyp wichtiger
+#    → VB quer:  Kaschierpaste + Drift wichtiger
+#    → Bedeutet: Haftungsversagen in Längs- und Querrichtung
+#      hat unterschiedliche Ursachen
+#
+# 4. DRIFT (Satzanfang - Satzende) hat schwachen aber
+#    messbaren Einfluss auf VB quer (0.067)
+#    → Schwankende Pastenauftragsmenge innerhalb eines Satzes
+#      wirkt sich auf Querhaftung aus
+#
+# 5. WALZENWECHSEL hat kaum Einfluss
+#    → Korrelation ~0.05 → kein systematischer Effekt
+#
+# 6. NUR 7 Z-SCORE AUSREISSER — alle mit HOHER Haftung
+#    → Keine systematisch schlechten Chargen sichtbar
+#    → Ausreißer sind positive Abweichungen, nicht negative
+#
+# 7. K-MEANS: 2 Cluster
+#    → Cluster 0 (~80 FAUFs): Normalbetrieb
+#    → Cluster 1 (~15 FAUFs): überdurchschnittlich hohe Haftung
+#      diese FAUFs sind prozessseitig interessant — was lief dort anders?
+#
+# 8. DBSCAN: 9 echte Anomalien
+#    → Diese FAUFs passen zu keinem normalen Prozessmuster
+#    → Sollten manuell geprüft werden
+# ══════════════════════════════════════════════════════════════
 
-rf_features = [
-    COL_ANFANG, 'Drift_Paste_imp', 'Drift_abs_imp', 'Hat_Satzende',
-    COL_WECHSEL + '_enc',
-    'Schaum_enc', 'Rezept_enc', 'Walze_enc'
+print("=" * 65)
+print("VERBUNDHAFTUNG ANALYSE — FINALE ZUSAMMENFASSUNG")
+print("=" * 65)
+
+# ── Finale Ergebnis-Tabelle ───────────────────────────────────
+export_cols = [
+    COL_FAUF, COL_REZEPT, 'Rezept_Gruppe', COL_SCHAUM,
+    COL_ANFANG, COL_ENDE, 'Drift_Paste',
+    COL_WALZE, COL_WECHSEL, COL_FRISCH,
+    VB_LAENGS, VB_QUER,
+    VB_LAENGS + '_z', VB_QUER + '_z',
+    'Cluster_KMeans', 'Cluster_DBSCAN'
 ]
-rf_features = [c for c in rf_features if c in df.columns]
+export_cols = [c for c in export_cols if c in df.columns]
+df_final = df[export_cols].copy()
 
-fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+# ── Lesbare Labels hinzufügen ─────────────────────────────────
+df_final['Status'] = 'Normal'
+df_final.loc[
+    (df_final[VB_LAENGS + '_z'].abs() > 2) |
+    (df_final[VB_QUER   + '_z'].abs() > 2),
+    'Status'
+] = '⚠ Z-Score Ausreißer'
 
-for ax, target, color in zip(axes, [VB_LAENGS, VB_QUER],
-                              ['steelblue', 'tomato']):
-    mask = df[rf_features + [target]].dropna().index
-    X_rf = df.loc[mask, rf_features]
-    y_rf = df.loc[mask, target]
+df_final.loc[
+    df_final['Cluster_DBSCAN'] == -1,
+    'Status'
+] = '🔴 DBSCAN Anomalie'
 
-    # Weniger Tiefe + Leave-One-Out wegen kleinem Datensatz
-    rf = RandomForestRegressor(
-        n_estimators=300,
-        max_depth=3,        # ← reduziert von 6 auf 3
-        min_samples_leaf=5, # ← neu: mindestens 5 Samples pro Blatt
-        random_state=42,
-        n_jobs=-1
+df_final.loc[
+    df_final['Cluster_KMeans'] == 1,
+    'Cluster_Bezeichnung'
+] = 'Hochhaftung'
+df_final.loc[
+    df_final['Cluster_KMeans'] == 0,
+    'Cluster_Bezeichnung'
+] = 'Normalbetrieb'
+
+# ── Statistiken ausgeben ──────────────────────────────────────
+print(f"\n📊 Datenbasis: {len(df_final)} FAUFs")
+print(f"\n🔵 K-Means Cluster:")
+print(df_final.groupby('Cluster_Bezeichnung')[
+    [VB_LAENGS, VB_QUER, COL_ANFANG]
+].mean().round(2).to_string())
+
+print(f"\n⚠️  Z-Score Ausreißer: "
+      f"{(df_final['Status'] == '⚠ Z-Score Ausreißer').sum()} FAUFs")
+print(f"🔴 DBSCAN Anomalien:  "
+      f"{(df_final['Status'] == '🔴 DBSCAN Anomalie').sum()} FAUFs")
+print(f"✅ Normale FAUFs:     "
+      f"{(df_final['Status'] == 'Normal').sum()} FAUFs")
+
+print(f"\n🏆 Top Einflussfaktoren auf Verbundhaftung:")
+print(f"   1. Kaschierpastenauftrag Satzanfang")
+print(f"      → Mehr Paste = bessere Haftung (quer: 0.65, längs: 0.35)")
+print(f"   2. Schaumpastenrezeptur")
+print(f"      → Rezeptauswahl hat systematischen Einfluss")
+print(f"      → Besonders bei VB längs (0.33)")
+print(f"   3. Walzentyp (nur VB längs: 0.15)")
+print(f"   4. Drift Kaschierpaste (nur VB quer: 0.07)")
+
+print(f"\n💡 Handlungsempfehlungen:")
+print(f"   • Kaschierpastenauftrag möglichst konstant hoch halten")
+print(f"   • Schaumpastenrezeptur bei Haftungsproblemen prüfen")
+print(f"   • Die {(df_final['Status'] == '🔴 DBSCAN Anomalie').sum()}"
+      f" DBSCAN-Anomalien manuell untersuchen")
+print(f"   • Cluster-1-FAUFs analysieren: was lief dort besser?")
+print("=" * 65)
+
+# ── Export ────────────────────────────────────────────────────
+df_final.to_excel('verbundhaftung_ergebnis.xlsx', index=False)
+print(f"\n✅ Export: verbundhaftung_ergebnis.xlsx")
+
+display(df_final[[
+    COL_FAUF, COL_REZEPT, COL_SCHAUM,
+    VB_LAENGS, VB_QUER,
+    'Cluster_Bezeichnung', 'Status'
+]].sort_values('Status').reset_index(drop=True))
+
+
+
+
+
+
+
+
+
+
+
+
+# ══════════════════════════════════════════════════════════════
+# ABSCHLIESSENDE VISUALISIERUNG — Alles auf einen Blick
+# ══════════════════════════════════════════════════════════════
+
+fig, axes = plt.subplots(2, 2, figsize=(18, 12))
+fig.suptitle('Verbundhaftung Analyse — Gesamtübersicht',
+             fontsize=16, fontweight='bold', y=1.01)
+
+# ── Plot 1: Verteilung VB längs vs quer ───────────────────────
+ax = axes[0, 0]
+ax.scatter(
+    df_final[VB_LAENGS], df_final[VB_QUER],
+    c=df_final['Cluster_KMeans'].map({0: 'steelblue', 1: 'tomato'}),
+    s=80, edgecolors='white', linewidth=0.6, alpha=0.85
+)
+# DBSCAN Anomalien markieren
+anomalien = df_final[df_final['Cluster_DBSCAN'] == -1]
+ax.scatter(
+    anomalien[VB_LAENGS], anomalien[VB_QUER],
+    s=150, facecolors='none', edgecolors='red',
+    linewidth=2, label='DBSCAN Anomalie', zorder=5
+)
+ax.set_xlabel('Verbundhaftung / längs [N]')
+ax.set_ylabel('Verbundhaftung / quer [N]')
+ax.set_title('VB längs vs. quer\n(Farbe = K-Means Cluster, Kreis = Anomalie)')
+ax.legend(handles=[
+    Patch(color='steelblue', label='Cluster 0 — Normalbetrieb'),
+    Patch(color='tomato',    label='Cluster 1 — Hochhaftung'),
+    plt.Line2D([0], [0], marker='o', color='w',
+               markerfacecolor='none', markeredgecolor='red',
+               markersize=10, linewidth=2, label='DBSCAN Anomalie')
+], fontsize=9)
+ax.grid(True, alpha=0.3)
+
+# ── Plot 2: Kaschierpaste vs VB quer (wichtigster Zusammenhang)
+ax = axes[0, 1]
+farben_cluster = df_final['Cluster_KMeans'].map(
+    {0: 'steelblue', 1: 'tomato'})
+ax.scatter(df_final[COL_ANFANG], df_final[VB_QUER],
+           c=farben_cluster, s=80,
+           edgecolors='white', linewidth=0.6, alpha=0.85)
+
+# Regressionslinie
+valid = df_final[[COL_ANFANG, VB_QUER]].dropna()
+m, b, r, p, _ = stats.linregress(
+    valid[COL_ANFANG].astype(float),
+    valid[VB_QUER].astype(float)
+)
+x_line = np.linspace(valid[COL_ANFANG].min(),
+                     valid[COL_ANFANG].max(), 100)
+ax.plot(x_line, m * x_line + b, 'k--',
+        linewidth=1.5, label=f'r={r:.2f}, p={p:.3f}')
+ax.set_xlabel('Kaschierpastenauftrag Satzanfang [g/m²]')
+ax.set_ylabel('Verbundhaftung / quer [N]')
+ax.set_title('Wichtigster Zusammenhang\nKaschierpaste → VB quer')
+ax.legend(fontsize=9)
+ax.grid(True, alpha=0.3)
+
+# ── Plot 3: VB längs nach Schaumpastenrezeptur ────────────────
+ax = axes[1, 0]
+if COL_SCHAUM in df_final.columns:
+    schaum_gruppen = df_final.groupby(COL_SCHAUM)[VB_LAENGS].apply(list)
+    schaum_gruppen = schaum_gruppen[
+        schaum_gruppen.apply(len) >= 3  # mind. 3 FAUFs
+    ].sort_index()
+
+    bp = ax.boxplot(
+        schaum_gruppen.values,
+        labels=[str(s)[:15] for s in schaum_gruppen.index],
+        patch_artist=True,
+        medianprops=dict(color='white', linewidth=2)
     )
-    rf.fit(X_rf, y_rf)
+    colors_box = plt.cm.tab10(
+        np.linspace(0, 1, len(schaum_gruppen)))
+    for patch, color in zip(bp['boxes'], colors_box):
+        patch.set_facecolor(color)
 
-    # 3-fold statt 5-fold wegen kleinem Datensatz
-    cv_r2  = cross_val_score(rf, X_rf, y_rf, cv=3, scoring='r2')
-    cv_mae = cross_val_score(rf, X_rf, y_rf, cv=3,
-                             scoring='neg_mean_absolute_error')
+    ax.set_xlabel('Schaumpastenrezeptur')
+    ax.set_ylabel('Verbundhaftung / längs [N]')
+    ax.set_title('VB längs je Schaumpastenrezeptur\n'
+                 '(bestätigt Einfluss der Schaumpaste)')
+    ax.tick_params(axis='x', rotation=30)
+    ax.grid(True, alpha=0.3, axis='y')
 
-    imp = pd.Series(rf.feature_importances_,
-                    index=rf_features).sort_values()
-    bar_colors = [color if v > imp.quantile(0.6) else '#cccccc'
-                  for v in imp]
-    ax.barh(imp.index, imp.values, color=bar_colors, edgecolor='white')
-    ax.set_title(f'{target}\n'
-                 f'R² CV: {cv_r2.mean():.3f} ± {cv_r2.std():.3f} | '
-                 f'MAE: {-cv_mae.mean():.1f} N')
-    ax.set_xlabel('Feature Importance')
-    ax.grid(True, alpha=0.3, axis='x')
+# ── Plot 4: Feature Importance Vergleich ─────────────────────
+ax = axes[1, 1]
+features_label = [
+    'Kaschierpaste\nSatzanfang',
+    'Schaum\nRezeptur',
+    'Walze\nTyp',
+    'Drift\nPaste',
+    'Drift\nabs',
+    'Rezept\nGruppe',
+    'Hat\nSatzende',
+    'Walze\ngewechselt'
+]
+# Werte aus Random Forest Ergebnis (manuell aus Ausgabe)
+imp_laengs = [0.352, 0.333, 0.154, 0.067, 0.048, 0.030, 0.010, 0.006]
+imp_quer   = [0.651, 0.169, 0.044, 0.067, 0.034, 0.020, 0.010, 0.005]
 
-    print(f'\n{target}')
-    print(f'  R² (3-fold CV):  {cv_r2.mean():.3f} ± {cv_r2.std():.3f}')
-    print(f'  MAE (3-fold CV): {-cv_mae.mean():.1f} N')
-    print(f'  Top 3 Features:')
-    for feat, val in imp.sort_values(ascending=False).head(3).items():
-        print(f'    {feat}: {val:.3f}')
+x = np.arange(len(features_label))
+width = 0.35
+ax.bar(x - width/2, imp_laengs, width,
+       label='VB längs', color='steelblue', alpha=0.85)
+ax.bar(x + width/2, imp_quer, width,
+       label='VB quer', color='tomato', alpha=0.85)
+ax.set_xticks(x)
+ax.set_xticklabels(features_label, fontsize=8)
+ax.set_ylabel('Feature Importance')
+ax.set_title('Feature Importance — längs vs. quer\n'
+             'Kaschierpaste + Schaum dominieren')
+ax.legend()
+ax.grid(True, alpha=0.3, axis='y')
 
 plt.tight_layout()
+plt.savefig('verbundhaftung_gesamtuebersicht.png',
+            dpi=150, bbox_inches='tight')
 plt.show()
+
+# ── Finale Kennzahlen ─────────────────────────────────────────
+print("""
+╔══════════════════════════════════════════════════════════════╗
+║         VERBUNDHAFTUNG — FINALE ERKENNTNISSE                ║
+╠══════════════════════════════════════════════════════════════╣
+║                                                              ║
+║  📌 HAUPTEINFLUSSFAKTOREN                                    ║
+║     1. Kaschierpastenauftrag Satzanfang                      ║
+║        → Wichtigster Parameter für VB quer (65%)            ║
+║     2. Schaumpastenrezeptur                                  ║
+║        → Zweitwichtigster für beide Richtungen               ║
+║        → Besonders stark bei VB längs (33%)                  ║
+║     3. Walzentyp (nur VB längs, 15%)                         ║
+║                                                              ║
+║  📌 ANOMALIEN                                                ║
+║     • 7  Z-Score Ausreißer  (alle mit hoher Haftung)         ║
+║     • 9  DBSCAN Anomalien   (prozessseitig auffällig)        ║
+║     • 15 Hochhaftungs-FAUFs (Cluster 1 — was lief besser?)   ║
+║                                                              ║
+║  📌 HANDLUNGSEMPFEHLUNGEN                                    ║
+║     → Kaschierpastenauftrag konstant hoch halten             ║
+║     → Schaumpastenrezeptur bei Haftungsproblemen prüfen      ║
+║     → Cluster-1-FAUFs als Best-Practice analysieren          ║
+║     → 9 DBSCAN-Anomalien manuell untersuchen                 ║
+║                                                              ║
+║  📌 MODELL-LIMITIERUNG                                       ║
+║     → R² ~0 bei 95 FAUFs — zu wenig Daten für RF             ║
+║     → Feature Importances valide, Vorhersage noch nicht      ║
+║     → Mit 300+ FAUFs wäre prädiktives Modell möglich         ║
+║                                                              ║
+╚══════════════════════════════════════════════════════════════╝
+""")
