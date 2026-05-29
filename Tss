@@ -267,3 +267,17 @@ plt.show()
 
 
 
+
+
+
+
+
+# ── 999 Sentinel-Werte entfernen ──────────────────────────────
+for col in [VB_LAENGS, VB_QUER]:
+    if col in df.columns:
+        df[col] = df[col].replace(999, np.nan)
+        df[col] = df[col].replace(999.0, np.nan)
+
+# Kontrolle
+print("Nach Bereinigung:")
+print(df[[VB_LAENGS, VB_QUER]].describe().round(2))
