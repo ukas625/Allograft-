@@ -1,144 +1,3 @@
-cluster_features = [
-    COL_ANFANG, 'Drift_Paste_imp', 'Drift_abs_imp', 'Hat_Satzende',
-    COL_WECHSEL + '_enc', COL_FRISCH + '_enc', 'Schaum_enc',
-    VB_LAENGS, VB_QUER
-]
-cluster_features = [c for c in cluster_features if c in df.columns]
-
-df_c      = df[cluster_features].dropna()
-idx_valid = df_c.index
-
-X        = StandardScaler().fit_transform(df_c)
-pca      = PCA(n_components=2)
-X_pca    = pca.fit_transform(X)
-var_expl = pca.explained_variance_ratio_
-
-print(f'Gültige FAUFs: {len(df_c)} von {len(df)}')
-print(f'PCA: PC1={var_expl[0]:.1%}, PC2={var_expl[1]:.1%}, Gesamt={sum(var_expl):.1%}')
-
-
-
-
-
-
-
-
-inertias, sil_scores = [], []
-K_range = range(2, 9)
-
-for k in K_range:
-    km = KMeans(n_clusters=k, random_state=42, n_init=10)
-    km.fit(X)
-    inertias.append(km.inertia_)
-    sil_scores.append(silhouette_score(X, km.labels_))
-
-best_k = list(K_range)[np.argmax(sil_scores)]
-
-fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-axes[0].plot(K_range, inertias, 'bo-', markersize=8)
-axes[0].set_xlabel('k')
-axes[0].set_ylabel('Inertia')
-axes[0].set_title('Elbow-Methode')
-axes[0].grid(True, alpha=0.3)
-
-axes[1].plot(K_range, sil_scores, 'rs-', markersize=8)
-axes[1].axvline(best_k, color='green', linestyle='--',
-                label=f'Optimales k={best_k}')
-axes[1].set_xlabel('k')
-axes[1].set_ylabel('Silhouette Score')
-axes[1].set_title('Silhouette Score (höher = besser)')
-axes[1].legend()
-axes[1].grid(True, alpha=0.3)
-
-plt.tight_layout()
-plt.show()
-print(f'✅ Optimales k = {best_k}')
-
-
-
-
-
-
-kmeans = KMeans(n_clusters=best_k, random_state=42, n_init=10)
-df.loc[idx_valid, 'Cluster_KMeans'] = kmeans.fit_predict(X)
-
-farben = ['steelblue', 'tomato', 'green', 'orange', 'purple']
-fig, ax = plt.subplots(figsize=(9, 6))
-for cid in range(best_k):
-    mask = df.loc[idx_valid, 'Cluster_KMeans'] == cid
-    ax.scatter(X_pca[mask, 0], X_pca[mask, 1],
-               color=farben[cid], s=90, edgecolors='white',
-               linewidth=0.6, label=f'Cluster {cid}')
-ax.set_xlabel(f'PC1 ({var_expl[0]:.1%})')
-ax.set_ylabel(f'PC2 ({var_expl[1]:.1%})')
-ax.set_title(f'K-Means (k={best_k}) — PCA Projektion')
-ax.legend()
-plt.tight_layout()
-plt.show()
-
-print('Cluster-Profil:')
-display(
-    df.groupby('Cluster_KMeans')[
-        [VB_LAENGS, VB_QUER, COL_ANFANG, 'Drift_Paste_imp', 'Schaum_enc']
-    ].agg(['mean', 'std']).round(2)
-)
-
-
-
-
-
-
-# k-Distanz Plot → optimales eps ablesen
-k_dist = 4
-nbrs = NearestNeighbors(n_neighbors=k_dist).fit(X)
-distances, _ = nbrs.kneighbors(X)
-distances = np.sort(distances[:, k_dist - 1])
-
-fig, ax = plt.subplots(figsize=(9, 4))
-ax.plot(distances, color='steelblue')
-ax.set_xlabel('FAUFs (sortiert)')
-ax.set_ylabel(f'{k_dist}-Nachbar Distanz')
-ax.set_title('k-Distanz Plot — Knick = optimales eps')
-ax.grid(True, alpha=0.3)
-plt.tight_layout()
-plt.show()
-
-# eps am Knick ablesen und hier eintragen
-eps_optimal = 2.5
-
-db = DBSCAN(eps=eps_optimal, min_samples=3)
-df.loc[idx_valid, 'Cluster_DBSCAN'] = db.fit_predict(X)
-n_out = (df['Cluster_DBSCAN'] == -1).sum()
-
-fig, ax = plt.subplots(figsize=(9, 6))
-colors = ['red' if l == -1 else 'steelblue'
-          for l in df.loc[idx_valid, 'Cluster_DBSCAN']]
-ax.scatter(X_pca[:, 0], X_pca[:, 1], c=colors,
-           s=90, edgecolors='white', linewidth=0.6)
-ax.set_xlabel(f'PC1 ({var_expl[0]:.1%})')
-ax.set_ylabel(f'PC2 ({var_expl[1]:.1%})')
-ax.set_title(f'DBSCAN (eps={eps_optimal}) — {n_out} Ausreißer (rot)')
-ax.legend(handles=[
-    Patch(color='steelblue', label='Normal'),
-    Patch(color='red', label=f'Ausreißer n={n_out}')
-])
-plt.tight_layout()
-plt.show()
-
-print(f'Ausreißer-FAUFs (n={n_out}):')
-display(
-    df[df['Cluster_DBSCAN'] == -1][
-        [COL_FAUF, COL_REZEPT, COL_SCHAUM,
-         VB_LAENGS, VB_QUER, 'Drift_Paste_imp']
-    ].reset_index(drop=True)
-)
-
-
-
-
-
-
-
 df['Rezept_enc'] = LabelEncoder().fit_transform(
     df['Rezept_Gruppe'].fillna('Unbekannt'))
 df['Walze_enc']  = LabelEncoder().fit_transform(
@@ -159,42 +18,38 @@ for ax, target, color in zip(axes, [VB_LAENGS, VB_QUER],
     X_rf = df.loc[mask, rf_features]
     y_rf = df.loc[mask, target]
 
-    rf = RandomForestRegressor(n_estimators=300, max_depth=6,
-                               random_state=42, n_jobs=-1)
+    # Weniger Tiefe + Leave-One-Out wegen kleinem Datensatz
+    rf = RandomForestRegressor(
+        n_estimators=300,
+        max_depth=3,        # ← reduziert von 6 auf 3
+        min_samples_leaf=5, # ← neu: mindestens 5 Samples pro Blatt
+        random_state=42,
+        n_jobs=-1
+    )
     rf.fit(X_rf, y_rf)
-    cv_r2 = cross_val_score(rf, X_rf, y_rf, cv=5, scoring='r2')
+
+    # 3-fold statt 5-fold wegen kleinem Datensatz
+    cv_r2  = cross_val_score(rf, X_rf, y_rf, cv=3, scoring='r2')
+    cv_mae = cross_val_score(rf, X_rf, y_rf, cv=3,
+                             scoring='neg_mean_absolute_error')
 
     imp = pd.Series(rf.feature_importances_,
                     index=rf_features).sort_values()
     bar_colors = [color if v > imp.quantile(0.6) else '#cccccc'
                   for v in imp]
     ax.barh(imp.index, imp.values, color=bar_colors, edgecolor='white')
-    ax.set_title(f'{target}\nR² CV: {cv_r2.mean():.3f} ± {cv_r2.std():.3f}')
+    ax.set_title(f'{target}\n'
+                 f'R² CV: {cv_r2.mean():.3f} ± {cv_r2.std():.3f} | '
+                 f'MAE: {-cv_mae.mean():.1f} N')
     ax.set_xlabel('Feature Importance')
     ax.grid(True, alpha=0.3, axis='x')
 
-    print(f'\n{target} — Top 3:')
+    print(f'\n{target}')
+    print(f'  R² (3-fold CV):  {cv_r2.mean():.3f} ± {cv_r2.std():.3f}')
+    print(f'  MAE (3-fold CV): {-cv_mae.mean():.1f} N')
+    print(f'  Top 3 Features:')
     for feat, val in imp.sort_values(ascending=False).head(3).items():
-        print(f'  {feat}: {val:.3f}')
+        print(f'    {feat}: {val:.3f}')
 
 plt.tight_layout()
 plt.show()
-
-
-
-
-
-
-export_cols = [
-    COL_FAUF, COL_REZEPT, 'Rezept_Gruppe', COL_SCHAUM,
-    COL_ANFANG, COL_ENDE, 'Drift_Paste',
-    COL_WALZE, COL_WECHSEL, COL_FRISCH,
-    VB_LAENGS, VB_QUER,
-    VB_LAENGS + '_z', VB_QUER + '_z',
-    'Cluster_KMeans', 'Cluster_DBSCAN'
-]
-export_cols = [c for c in export_cols if c in df.columns]
-
-df[export_cols].to_excel('verbundhaftung_ergebnis.xlsx', index=False)
-print('✅ Export: verbundhaftung_ergebnis.xlsx')
-display(df[export_cols].head(10))
