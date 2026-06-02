@@ -1,3 +1,17 @@
+# %% ──────────────── ZELLE 8 (Variante 1) ────────────────
+# === Cluster-Vorbereitung (PCA) — ohne redundante Walzen-Flags ===
+# Die binären Walzen-Flags (gewechselt/WSC, r≈0.89) dominierten sonst die Distanzen
+# und das Clustering bildete nur den Walzenwechsel ab. Jetzt: Prozess + Material + Haftung.
+CF = [COL_SATZANFANG, "Drift_Paste_imp", "Drift_abs_imp", VB_LAENGS, VB_QUER]
+CF += [c for c in ["Viskosität Deckstrich", "Viskosität Schaumstrich"] if c in df.columns]
+cl = df.dropna(subset=TARGETS).copy()
+X = cl[CF].fillna(cl[CF].median()); Xz = StandardScaler().fit_transform(X)
+pca = PCA(n_components=2, random_state=RNG); Xp = pca.fit_transform(Xz)
+print(f"Cluster-Datensatz: {X.shape[0]} FAUFs, {X.shape[1]} Features (ohne Walzen-Flags)")
+print(f"PCA-Varianz: PC1={pca.explained_variance_ratio_[0]:.1%}, PC2={pca.explained_variance_ratio_[1]:.1%}, "
+      f"Σ={pca.explained_variance_ratio_[:2].sum():.1%}")
+
+
 # %% ──────────────── ZELLE 1 ────────────────
 # === Imports ===
 import re, warnings
