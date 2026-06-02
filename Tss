@@ -1,164 +1,355 @@
-# ══════════════════════════════════════════════════════════════
-# WICHTIG: Clustering nur auf numerischen Features
-# OHE würde Clustering auf Rezept-Identität reduzieren
-# statt auf Prozessverhalten — das ist nicht das Ziel
-# ══════════════════════════════════════════════════════════════
+# %% ──────────────── ZELLE 1 ────────────────
+# === Imports ===
+import re, warnings
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy import stats
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans, DBSCAN
+from sklearn.neighbors import NearestNeighbors
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import cross_val_score, KFold
+from sklearn.metrics import silhouette_score
+from sklearn.inspection import permutation_importance
 
-cluster_features = [
-    COL_ANFANG,
-    'Drift_Paste_imp',
-    'Drift_abs_imp',
-    'Hat_Satzende',
-    COL_WECHSEL + '_enc',
-    COL_FRISCH  + '_enc',
-    VB_LAENGS,
-    VB_QUER
-]
-cluster_features = [c for c in cluster_features if c in df.columns]
+warnings.filterwarnings("ignore")
+sns.set_theme(style="whitegrid")
+plt.rcParams["figure.dpi"] = 110
+RNG = 42
 
-df_c      = df[cluster_features].dropna()
-idx_valid = df_c.index
+# %% ──────────────── ZELLE 2 ────────────────
+# === Daten laden & Spaltennamen säubern ===
+FILE = "output_2.xlsx"
+raw = pd.read_excel(FILE, sheet_name="Sheet1")
+raw.columns = raw.columns.str.strip().str.replace(r"\s+", " ", regex=True)
 
-X        = StandardScaler().fit_transform(df_c)
-pca      = PCA(n_components=2)
-X_pca    = pca.fit_transform(X)
-var_expl = pca.explained_variance_ratio_
+# exakte Dubletten-Spalten ('...(j/n).1') entfernen
+for c in [c for c in raw.columns if c.endswith(".1")]:
+    raw = raw.drop(columns=c)
 
-print(f'Gültige FAUFs:   {len(df_c)} von {len(df)}')
-print(f'Anzahl Features: {len(cluster_features)}')
-print(f'PCA: PC1={var_expl[0]:.1%}, PC2={var_expl[1]:.1%}, '
-      f'Gesamt={sum(var_expl):.1%}')
-print(f'\nFeatures:')
-for f in cluster_features:
-    print(f'  • {f}')
+print(f"Shape: {raw.shape}")
+print("Spalten:")
+for c in raw.columns:
+    print("  ", repr(c))
 
+# %% ──────────────── ZELLE 3 ────────────────
+# === Konfiguration ===
+VB_LAENGS = "Verbundhaftung / längs"
+VB_QUER   = "Verbundhaftung / quer"
+TARGETS   = [VB_LAENGS, VB_QUER]
 
+COL_FAUF       = "FAUF"
+COL_REZEPT     = "Kaschierpastenrezeptur"
+COL_SATZANFANG = "Kaschierpastenauftrag Satzanfang [g/m²]"
+COL_SATZENDE   = "Kaschierpastenauftrag Satzende [g/m²]"
+COL_SCHAUM     = "Schaumpastenrezeptur"
+COL_WALZE      = "Walzenbezeichnung"
+COL_WECHSEL    = "Walze zu Satzanfang gewechselt? (j/n)"
+COL_WSC        = "Walze frisch vom WSC (j/n)"
+COL_MERKMAL    = "Kurztext zu Prüfmerkmal"
+COL_MITTELWERT = "Mittelwert"
 
+# Optionale numerische Prüfmerkmale, die als Feature taugen (Prozess-/Materialgrößen)
+OPT_VISK = ["Viskosität Deckstrich", "Viskosität Kaschierstrich", "Viskosität Schaumstrich"]
 
+SENTINEL    = 999   # SAP-Sentinel, KEIN Messwert
+VB_PHYS_MAX = 300   # N, physikalische Obergrenze
+IS_LONG = COL_MERKMAL in raw.columns
+print("Erkanntes Format:", "LONG (wird pivotiert)" if IS_LONG else "WIDE (bereits pivotiert)")
 
+# %% ──────────────── ZELLE 4 ────────────────
+# === Datenvorbereitung ===
+PARAM_COLS = [COL_FAUF, COL_REZEPT, COL_SATZANFANG, COL_SATZENDE,
+              COL_SCHAUM, COL_WALZE, COL_WECHSEL, COL_WSC]
+PARAM_COLS = [c for c in PARAM_COLS if c in raw.columns]
 
+if IS_LONG:
+    r = raw.copy()
+    # 1) Mittelwert numerisch; 999-Sentinel VOR Pivot -> NaN
+    r["_MW"] = pd.to_numeric(r[COL_MITTELWERT], errors="coerce").replace(SENTINEL, np.nan)
+    print(f"999-Sentinel ersetzt: {(pd.to_numeric(raw[COL_MITTELWERT], errors='coerce')==SENTINEL).sum()} Zeilen")
+    # 2) Pivot: ein FAUF je Zeile, Prüfmerkmale als Spalten
+    pivot = r.pivot_table(index=COL_FAUF, columns=COL_MERKMAL, values="_MW", aggfunc="mean")
+    # 3) Prozessparameter je FAUF (erste Zeile) und mergen
+    params = r.drop_duplicates(subset=COL_FAUF)[PARAM_COLS].set_index(COL_FAUF)
+    df = params.join(pivot).reset_index()
+else:
+    df = raw.copy()
+    for t in TARGETS:
+        if t in df.columns:
+            df[t] = df[t].replace(SENTINEL, np.nan)
 
+# 3b) numerische Prozessspalten sicher zu float casten (kommen ggf. als Text)
+for c in [COL_SATZANFANG, COL_SATZENDE]:
+    if c in df.columns:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
 
+# 4) Physikalisch unmögliche Verbundhaftung > 300 N -> NaN
+for t in TARGETS:
+    n_bad = (df[t] > VB_PHYS_MAX).sum()
+    df.loc[df[t] > VB_PHYS_MAX, t] = np.nan
+    print(f"{t}: {n_bad} Werte > {VB_PHYS_MAX} N entfernt -> n={df[t].notna().sum()}")
 
-inertias, sil_scores = [], []
-K_range = range(2, 7)
+# 5) Drift der Auftragsmenge
+df["Drift_Paste"]  = df[COL_SATZANFANG] - df[COL_SATZENDE]
+df["Drift_abs"]    = df["Drift_Paste"].abs()
+df["Hat_Satzende"] = df[COL_SATZENDE].notna().astype(int)
+df["Drift_Paste_imp"] = df["Drift_Paste"].fillna(0)
+df["Drift_abs_imp"]   = df["Drift_abs"].fillna(0)
 
-for k in K_range:
-    km = KMeans(n_clusters=k, random_state=42, n_init=10)
-    km.fit(X)
-    inertias.append(km.inertia_)
-    sil_scores.append(silhouette_score(X, km.labels_))
+# 6) Robustes Ja/Nein-Encoding (Schreibweisen inkonsistent)
+JN_MAP = {"ja": 1, "j": 1, "nein": 0, "n": 0, "nan": 0, "": 0}
+enc = lambda s: s.astype(str).str.strip().str.lower().map(JN_MAP).fillna(0).astype(int)
+df["Walze_gewechselt_enc"] = enc(df[COL_WECHSEL])
+df["Walze_WSC_enc"]        = enc(df[COL_WSC])
 
-# Jetzt kein künstlicher Cap mehr nötig
-best_k = list(K_range)[np.argmax(sil_scores)]
+# 7) Walzenbezeichnung normalisieren (es gibt nur 3 echte Walzen)
+def norm_walze(s):
+    if pd.isna(s): return np.nan
+    s = str(s).strip().upper().replace(" ", "")
+    s = s.replace("RO", "R0")
+    s = re.sub(r"R7(?=/|\d)", "R07", s)        # R7/02 -> R07/02
+    s = re.sub(r"R0?7O", "R070", s)            # ro7o2 Reste
+    return s
+df["Walze_norm"] = df[COL_WALZE].map(norm_walze)
+walze_ohe = pd.get_dummies(df["Walze_norm"], prefix="Walze")
+df = pd.concat([df, walze_ohe], axis=1); walze_cols = list(walze_ohe.columns)
+
+# 8) Schaumrezeptur normalisieren -> Top (>=5 FAUFs), Rest 'Sonstige'
+def norm_schaum(s):
+    if pd.isna(s): return np.nan
+    s = str(s).strip().upper()
+    s = re.sub(r"[\s]+", "/", s); s = re.sub(r"-{2,}", "-", s); s = re.sub(r"/+", "/", s)
+    return s.strip("/")
+df["Schaum_clean"] = df[COL_SCHAUM].map(norm_schaum)
+sc = df["Schaum_clean"].value_counts(); keep_s = sc[sc >= 5].index
+df["Schaum_clean"] = df["Schaum_clean"].where(df["Schaum_clean"].isin(keep_s), "Sonstige")
+schaum_ohe = pd.get_dummies(df["Schaum_clean"], prefix="Schaum")
+df = pd.concat([df, schaum_ohe], axis=1); schaum_cols = list(schaum_ohe.columns)
+
+# 9) Kaschierpastenrezeptur normalisieren -> Top (>=3 FAUFs), Rest 'Sonstige'
+def norm_rezept(s):
+    if pd.isna(s): return np.nan
+    s = str(s).strip().upper(); s = re.sub(r"^P\s*", "", s)
+    s = re.sub(r"[\s\-]+", "/", s); s = re.sub(r"/+", "/", s)
+    s = re.sub(r"\+?H$", "", s).strip("/")
+    return s
+df["Rezept_clean"] = df[COL_REZEPT].map(norm_rezept)
+df["Rezept_Gruppe"] = df["Rezept_clean"].str.split("/").str[0]
+rc = df["Rezept_clean"].value_counts(); keep_r = rc[rc >= 3].index
+df["Rezept_clean"] = df["Rezept_clean"].where(df["Rezept_clean"].isin(keep_r), "Sonstige")
+rezept_ohe = pd.get_dummies(df["Rezept_clean"], prefix="Rezept")
+df = pd.concat([df, rezept_ohe], axis=1); rezept_cols = list(rezept_ohe.columns)
+
+# 10) Numerische Feature-Liste (Prozess-/Materialgrößen, KEINE Co-Outcomes wie Flächengewicht/Dicke)
+NUM_FEATURES = [COL_SATZANFANG, "Drift_Paste_imp", "Drift_abs_imp", "Hat_Satzende",
+                "Walze_gewechselt_enc", "Walze_WSC_enc"]
+NUM_FEATURES += [c for c in OPT_VISK if c in df.columns]
+for f in NUM_FEATURES:                                   # Median-Imputation + Flag bei >30% Lücken
+    if df[f].isna().mean() > 0.30:
+        df[f + "_isna"] = df[f].isna().astype(int)
+        if f + "_isna" not in NUM_FEATURES: NUM_FEATURES.append(f + "_isna")
+    if df[f].isna().any(): df[f] = df[f].fillna(df[f].median())
+
+# 11) Kontrolle
+print("\nWalzen (norm):", df["Walze_norm"].value_counts(dropna=False).to_dict())
+print("OHE: Walze", len(walze_cols), "| Schaum", len(schaum_cols), "| Rezept", len(rezept_cols))
+print("Numerische Features:", NUM_FEATURES)
+print("Shape:", df.shape)
+print(df[TARGETS + [COL_SATZANFANG, "Drift_abs_imp"]].describe().round(2))
+
+# %% ──────────────── ZELLE 5 ────────────────
+# === Datenqualität: Fehlwerte-Report ===
+key = PARAM_COLS + TARGETS + [c for c in OPT_VISK if c in df.columns]
+key = [c for c in dict.fromkeys(key) if c in df.columns]
+miss = (df[key].isna().mean().sort_values(ascending=False) * 100).round(1)
+print("Fehlwerte je Kernspalte (%):"); print(miss[miss > 0].to_string())
+fig, ax = plt.subplots(figsize=(10, 4.5))
+sns.heatmap(df[key].isna().T, cbar=False, cmap="rocket_r", ax=ax)
+ax.set_title("Fehlwerte-Muster (hell = fehlt) je FAUF"); ax.set_xlabel("FAUF-Index"); ax.set_ylabel("")
+plt.tight_layout(); plt.show()
+
+# %% ──────────────── ZELLE 6 ────────────────
+# === Z-Score-Ausreißer auf Zielgrößen ===
+Z = 2.0
+df["Z_laengs"] = np.nan; df["Z_quer"] = np.nan
+ml = df[VB_LAENGS].notna(); mq = df[VB_QUER].notna()
+df.loc[ml, "Z_laengs"] = stats.zscore(df.loc[ml, VB_LAENGS])
+df.loc[mq, "Z_quer"]   = stats.zscore(df.loc[mq, VB_QUER])
+df["Z_outlier"] = (df["Z_laengs"].abs() > Z) | (df["Z_quer"].abs() > Z)
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+for ax, col, name in [(axes[0], VB_LAENGS, "längs"), (axes[1], VB_QUER, "quer")]:
+    v = df[col].dropna(); mu, sd = v.mean(), v.std()
+    ax.hist(v, bins=25, color="#4C72B0", edgecolor="white")
+    for k in (-Z, Z): ax.axvline(mu + k*sd, color="red", ls="--", lw=1)
+    ax.set_title(f"Verbundhaftung {name}  (μ={mu:.1f}, ±{Z}σ)"); ax.set_xlabel("N")
+plt.tight_layout(); plt.show()
+out = df.loc[df["Z_outlier"], [COL_FAUF, "Rezept_clean", "Schaum_clean", VB_LAENGS, VB_QUER, "Z_laengs", "Z_quer"]]
+print(f"{len(out)} Z-Score-Ausreißer (|Z|>{Z}):"); print(out.round(2).to_string(index=False))
+
+# %% ──────────────── ZELLE 7 ────────────────
+# === Korrelationsmatrix (numerisch, kein OHE) ===
+cc = [c for c in NUM_FEATURES if not c.endswith("_isna")] + TARGETS
+cc = list(dict.fromkeys(cc)); cm = df[cc].corr()
+fig, ax = plt.subplots(figsize=(9, 7))
+sns.heatmap(cm, annot=True, fmt=".2f", cmap="RdYlGn", center=0, square=True, cbar_kws={"shrink": .8}, ax=ax)
+ax.set_title("Korrelation: Prozessfeatures ↔ Verbundhaftung"); plt.tight_layout(); plt.show()
+for t in TARGETS:
+    s = cm[t].drop(TARGETS).abs().sort_values(ascending=False).head(4)
+    print(f"{t}:  " + " | ".join(f"{cm.loc[k,t]:+.2f} {k}" for k in s.index))
+
+# %% ──────────────── ZELLE 8 ────────────────
+# === Cluster-Vorbereitung (PCA) ===
+# Bewusst NUR numerische Prozess- + Zielgrößen (kein OHE) -> Cluster nach Prozessverhalten, nicht Rezept-Identität.
+CF = [COL_SATZANFANG, "Drift_Paste_imp", "Drift_abs_imp", "Hat_Satzende",
+      "Walze_gewechselt_enc", "Walze_WSC_enc", VB_LAENGS, VB_QUER]
+cl = df.dropna(subset=TARGETS).copy()
+X = cl[CF].fillna(cl[CF].median()); Xz = StandardScaler().fit_transform(X)
+pca = PCA(n_components=2, random_state=RNG); Xp = pca.fit_transform(Xz)
+print(f"Cluster-Datensatz: {X.shape[0]} FAUFs, {X.shape[1]} Features")
+print(f"PCA-Varianz: PC1={pca.explained_variance_ratio_[0]:.1%}, PC2={pca.explained_variance_ratio_[1]:.1%}, "
+      f"Σ={pca.explained_variance_ratio_[:2].sum():.1%}")
+
+# %% ──────────────── ZELLE 9 ────────────────
+# === Elbow + Silhouette ===
+Ks = range(2, 7); inertias, sils = [], []
+for k in Ks:
+    km = KMeans(n_clusters=k, random_state=RNG, n_init=10).fit(Xz)
+    inertias.append(km.inertia_); sils.append(silhouette_score(Xz, km.labels_))
+best_k = list(Ks)[int(np.argmax(sils))]
+fig, ax = plt.subplots(1, 2, figsize=(12, 4))
+ax[0].plot(list(Ks), inertias, "o-"); ax[0].set_title("Elbow (Inertia)"); ax[0].set_xlabel("k")
+ax[1].plot(list(Ks), sils, "o-", color="#55A868"); ax[1].axvline(best_k, color="red", ls="--")
+ax[1].set_title("Silhouette"); ax[1].set_xlabel("k")
+plt.tight_layout(); plt.show()
+print(f"Bestes k: {best_k} (Silhouette={max(sils):.3f})")
+
+# %% ──────────────── ZELLE 10 ────────────────
+# === K-Means ===
+km = KMeans(n_clusters=best_k, random_state=RNG, n_init=10); cl["Cluster"] = km.fit_predict(Xz)
+cmap = plt.get_cmap("tab10", best_k)
+fig, ax = plt.subplots(figsize=(7, 5.5))
+for c in range(best_k):
+    m = (cl["Cluster"] == c).values
+    ax.scatter(Xp[m, 0], Xp[m, 1], s=55, color=cmap(c), edgecolor="white", label=f"Cluster {c} (n={m.sum()})")
+ax.set_xlabel("PC1"); ax.set_ylabel("PC2"); ax.set_title("K-Means im PCA-Raum"); ax.legend()
+plt.tight_layout(); plt.show()
+print("Cluster-Profil (numerische Mittelwerte):"); print(cl.groupby("Cluster")[CF].mean().round(1).to_string())
+print("\nWalze/Schaum je Cluster:")
+for c in range(best_k):
+    w = cl.loc[cl["Cluster"]==c, "Walze_norm"].value_counts().head(2).to_dict()
+    s = cl.loc[cl["Cluster"]==c, "Schaum_clean"].value_counts().head(2).to_dict()
+    print(f"  Cluster {c}: Walze {w} | Schaum {s}")
+
+# %% ──────────────── ZELLE 11 ────────────────
+# === DBSCAN ===
+k_nn = 4
+dist, _ = NearestNeighbors(n_neighbors=k_nn).fit(Xz).kneighbors(Xz)
+kdist = np.sort(dist[:, -1]); eps_opt = float(np.percentile(kdist, 90))
+fig, ax = plt.subplots(figsize=(7, 4))
+ax.plot(kdist); ax.axhline(eps_opt, color="red", ls="--", label=f"eps≈{eps_opt:.2f}")
+ax.set_title(f"{k_nn}-Distanz-Plot"); ax.set_xlabel("sortierte Punkte"); ax.set_ylabel(f"{k_nn}-NN Distanz"); ax.legend()
+plt.tight_layout(); plt.show()
+dbs = DBSCAN(eps=eps_opt, min_samples=3).fit(Xz)
+cl["DBSCAN_anomalie"] = dbs.labels_ == -1
+print(f"eps={eps_opt:.2f}, min_samples=3 -> {int(cl['DBSCAN_anomalie'].sum())} Anomalien")
+print(cl.loc[cl["DBSCAN_anomalie"], [COL_FAUF,"Rezept_clean","Schaum_clean",COL_SATZANFANG,VB_LAENGS,VB_QUER]].round(1).to_string(index=False))
+
+# %% ──────────────── ZELLE 12 ────────────────
+# === Random Forest + Feature-Importance ===
+RF_FEATURES = [c for c in (NUM_FEATURES + walze_cols + schaum_cols + rezept_cols) if c in df.columns]
+RF_FEATURES = list(dict.fromkeys(RF_FEATURES))
+
+def run_rf(target):
+    sub = df.dropna(subset=[target]).copy()
+    Xr = sub[RF_FEATURES].fillna(sub[RF_FEATURES].median()); yr = sub[target]
+    rf = RandomForestRegressor(n_estimators=300, max_depth=3, min_samples_leaf=5, random_state=RNG)
+    cv = KFold(n_splits=3, shuffle=True, random_state=RNG)
+    r2  = cross_val_score(rf, Xr, yr, cv=cv, scoring="r2")
+    mae = -cross_val_score(rf, Xr, yr, cv=cv, scoring="neg_mean_absolute_error")
+    rf.fit(Xr, yr)
+    perm = permutation_importance(rf, Xr, yr, n_repeats=30, random_state=RNG)
+    imp = pd.DataFrame({"feature": RF_FEATURES, "impurity": rf.feature_importances_,
+                        "permutation": perm.importances_mean}).set_index("feature")
+    print(f"\n=== {target} === (n={len(sub)})  CV R²={r2.mean():.3f}±{r2.std():.3f} | CV MAE={mae.mean():.2f} N")
+    return imp.sort_values("permutation", ascending=False)
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-axes[0].plot(K_range, inertias, 'bo-', markersize=8)
-axes[0].set_xlabel('k')
-axes[0].set_ylabel('Inertia')
-axes[0].set_title('Elbow-Methode')
-axes[0].grid(True, alpha=0.3)
+for ax, t, name in [(axes[0], VB_LAENGS, "längs"), (axes[1], VB_QUER, "quer")]:
+    imp = run_rf(t).head(10).iloc[::-1]
+    ax.barh(imp.index, imp["permutation"], color="#C44E52")
+    ax.set_title(f"Top-10 Permutation Importance — {name}"); ax.set_xlabel("Δ Score")
+plt.tight_layout(); plt.show()
+print("\nHinweis: Permutation Importance ist bei kleinem n robuster als Impurity-Importance.")
 
-axes[1].plot(K_range, sil_scores, 'rs-', markersize=8)
-axes[1].axvline(best_k, color='green', linestyle='--',
-                label=f'Optimales k={best_k}')
-axes[1].set_xlabel('k')
-axes[1].set_ylabel('Silhouette Score')
-axes[1].set_title('Silhouette Score (höher = besser)')
-axes[1].legend()
-axes[1].grid(True, alpha=0.3)
+# %% ──────────────── ZELLE 13 ────────────────
+# === Zusammenfassung, Status & Export ===
+df = df.merge(cl[[COL_FAUF, "Cluster", "DBSCAN_anomalie"]], on=COL_FAUF, how="left")
+def status(r):
+    if r.get("DBSCAN_anomalie") is True: return "🔴 DBSCAN Anomalie"
+    if r.get("Z_outlier"): return "⚠ Z-Score Ausreißer"
+    return "Normal"
+df["Status"] = df.apply(status, axis=1)
+if df["Cluster"].notna().any():
+    rank = df.groupby("Cluster")[VB_QUER].mean().rank()
+    lab = {c: ("Hochhaftung" if rank[c]==rank.max() else "Normalbetrieb" if rank[c]==rank.min() else f"Mittel-{int(c)}") for c in rank.index}
+    df["Cluster_Bezeichnung"] = df["Cluster"].map(lab)
 
-plt.tight_layout()
-plt.show()
-print(f'✅ Optimales k = {best_k}')
+cols = [COL_FAUF,"Rezept_clean","Schaum_clean","Walze_norm",COL_SATZANFANG,"Drift_Paste_imp",
+        "Hat_Satzende","Walze_gewechselt_enc","Walze_WSC_enc",VB_LAENGS,VB_QUER,
+        "Cluster","Cluster_Bezeichnung","Status"]
+cols = [c for c in cols if c in df.columns]
+df[cols].to_excel("verbundhaftung_ergebnis.xlsx", index=False)
 
+print("=== KENNZAHLEN ===")
+print(f"FAUFs gesamt:           {len(df)}")
+print(f"Valide VB längs / quer: {df[VB_LAENGS].notna().sum()} / {df[VB_QUER].notna().sum()}")
+print(f"Z-Score-Ausreißer:      {int(df['Z_outlier'].sum())}")
+print(f"DBSCAN-Anomalien:       {int(df['DBSCAN_anomalie'].fillna(False).sum())}")
+print(f"Cluster (k):            {best_k}")
+print(f"VB quer Median/Mean:    {df[VB_QUER].median():.1f} / {df[VB_QUER].mean():.1f} N")
+print("\nStatus-Verteilung:"); print(df["Status"].value_counts().to_string())
+print("\n=== HANDLUNGSEMPFEHLUNGEN ===")
+print("• 🔴/⚠ FAUFs manuell prüfen (Mess- vs. Prozessfehler).")
+print("• Kaschierpaste-Satzanfang als stärksten Hebel auf VB quer überwachen.")
+print("• Walze-gewechselt & Walze-WSC ~0.9 korreliert -> für Modelle nur EINEN behalten.")
+print("• Datenbasis auf 300+ FAUFs ausbauen, bevor Vorhersage produktiv genutzt wird.")
+print("\nExport: verbundhaftung_ergebnis.xlsx")
 
+# %% ──────────────── ZELLE 14 ────────────────
+# === Abschluss-Übersicht (2x2) ===
+fig, ax = plt.subplots(2, 2, figsize=(14, 11))
 
+a = ax[0, 0]; sc = cl.dropna(subset=TARGETS)
+for c in sorted(sc["Cluster"].unique()):
+    m = sc["Cluster"] == c
+    a.scatter(sc.loc[m, VB_LAENGS], sc.loc[m, VB_QUER], s=55, color=plt.get_cmap("tab10", best_k)(c),
+              edgecolor="white", label=f"Cluster {c}")
+an = sc[sc["DBSCAN_anomalie"]]
+a.scatter(an[VB_LAENGS], an[VB_QUER], s=170, facecolors="none", edgecolors="red", linewidths=1.8, label="DBSCAN-Anomalie")
+a.set_xlabel("VB längs [N]"); a.set_ylabel("VB quer [N]"); a.set_title("Verbundhaftung längs vs. quer"); a.legend(fontsize=8)
 
+a = ax[0, 1]; reg = df.dropna(subset=[COL_SATZANFANG, VB_QUER])
+a.scatter(reg[COL_SATZANFANG], reg[VB_QUER], alpha=0.7, color="#4C72B0")
+sl, ic, r, p, _ = stats.linregress(reg[COL_SATZANFANG], reg[VB_QUER])
+xs = np.linspace(reg[COL_SATZANFANG].min(), reg[COL_SATZANFANG].max(), 50)
+a.plot(xs, ic + sl*xs, "r-", lw=2)
+a.set_xlabel("Kaschierpaste Satzanfang [g/m²]"); a.set_ylabel("VB quer [N]")
+a.set_title(f"Auftragsmenge → VB quer  (r={r:.2f}, p={p:.3f})")
 
+a = ax[1, 0]; g = df.dropna(subset=[VB_LAENGS])
+order = g.groupby("Walze_norm")[VB_LAENGS].median().sort_values().index
+sns.boxplot(data=g, x="Walze_norm", y=VB_LAENGS, order=order, ax=a, color="#55A868")
+a.set_title("VB längs je Walze"); a.set_xlabel(""); a.tick_params(axis="x", rotation=30)
 
-
-
-kmeans = KMeans(n_clusters=best_k, random_state=42, n_init=10)
-df.loc[idx_valid, 'Cluster_KMeans'] = kmeans.fit_predict(X)
-
-cmap   = plt.cm.get_cmap('tab10', best_k)
-farben = [cmap(i) for i in range(best_k)]
-
-fig, ax = plt.subplots(figsize=(9, 6))
-for cid in range(best_k):
-    mask = df.loc[idx_valid, 'Cluster_KMeans'] == cid
-    ax.scatter(
-        X_pca[mask, 0], X_pca[mask, 1],
-        color=farben[cid], s=90,
-        edgecolors='white', linewidth=0.6,
-        label=f'Cluster {int(cid)}'
-    )
-ax.set_xlabel(f'PC1 ({var_expl[0]:.1%})')
-ax.set_ylabel(f'PC2 ({var_expl[1]:.1%})')
-ax.set_title(f'K-Means (k={best_k}) — PCA Projektion\n'
-             f'Clustering auf Prozessverhalten (numerisch)')
-ax.legend()
-plt.tight_layout()
-plt.show()
-
-print('Cluster-Profil:')
-display(
-    df.groupby('Cluster_KMeans')[
-        [VB_LAENGS, VB_QUER, COL_ANFANG,
-         'Drift_Paste_imp', 'Walze_norm']
-    ].agg(['mean', 'std']).round(2)
-)
-
-
-
-
-
-
-
-from matplotlib.patches import Patch
-from sklearn.neighbors import NearestNeighbors
-
-k_dist = 4
-nbrs = NearestNeighbors(n_neighbors=k_dist).fit(X)
-distances, _ = nbrs.kneighbors(X)
-distances = np.sort(distances[:, k_dist - 1])
-
-fig, ax = plt.subplots(figsize=(9, 4))
-ax.plot(distances, color='steelblue', linewidth=2)
-ax.set_xlabel('FAUFs (sortiert)')
-ax.set_ylabel(f'{k_dist}-Nachbar Distanz')
-ax.set_title('k-Distanz Plot — Knick = optimales eps')
-ax.grid(True, alpha=0.3)
-plt.tight_layout()
-plt.show()
-
-# Im numerischen Raum (8 Features) ist eps ~1.5-2.5 realistisch
-eps_optimal = 2.0
-
-db = DBSCAN(eps=eps_optimal, min_samples=3)
-df.loc[idx_valid, 'Cluster_DBSCAN'] = db.fit_predict(X)
-n_out = (df['Cluster_DBSCAN'] == -1).sum()
-
-fig, ax = plt.subplots(figsize=(9, 6))
-colors = ['red' if l == -1 else 'steelblue'
-          for l in df.loc[idx_valid, 'Cluster_DBSCAN']]
-ax.scatter(X_pca[:, 0], X_pca[:, 1], c=colors,
-           s=90, edgecolors='white', linewidth=0.6)
-ax.set_xlabel(f'PC1 ({var_expl[0]:.1%})')
-ax.set_ylabel(f'PC2 ({var_expl[1]:.1%})')
-ax.set_title(f'DBSCAN (eps={eps_optimal}) — {n_out} Ausreißer (rot)')
-ax.legend(handles=[
-    Patch(color='steelblue', label='Normal'),
-    Patch(color='red', label=f'Ausreißer n={n_out}')
-])
-plt.tight_layout()
-plt.show()
-
-print(f'DBSCAN Ausreißer (n={n_out}):')
-display(
-    df[df['Cluster_DBSCAN'] == -1][
-        [COL_FAUF, 'Rezept_norm', 'Schaum_norm', 'Walze_norm',
-         VB_LAENGS, VB_QUER, 'Drift_Paste_imp']
-    ].reset_index(drop=True)
-)
+a = ax[1, 1]; gq = df.dropna(subset=[VB_QUER])
+keep = gq["Schaum_clean"].value_counts(); keep = keep[keep >= 3].index
+gq = gq[gq["Schaum_clean"].isin(keep)]
+order = gq.groupby("Schaum_clean")[VB_QUER].median().sort_values().index
+sns.boxplot(data=gq, x="Schaum_clean", y=VB_QUER, order=order, ax=a, color="#C44E52")
+a.set_title("VB quer je Schaumrezeptur (≥3 FAUFs)"); a.set_xlabel(""); a.tick_params(axis="x", rotation=45)
+plt.tight_layout(); plt.show()
