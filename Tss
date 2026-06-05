@@ -1,15 +1,153 @@
-# %% ──────────────── ZELLE 8 (Variante 1) ────────────────
-# === Cluster-Vorbereitung (PCA) — ohne redundante Walzen-Flags ===
-# Die binären Walzen-Flags (gewechselt/WSC, r≈0.89) dominierten sonst die Distanzen
-# und das Clustering bildete nur den Walzenwechsel ab. Jetzt: Prozess + Material + Haftung.
-CF = [COL_SATZANFANG, "Drift_Paste_imp", "Drift_abs_imp", VB_LAENGS, VB_QUER]
-CF += [c for c in ["Viskosität Deckstrich", "Viskosität Schaumstrich"] if c in df.columns]
-cl = df.dropna(subset=TARGETS).copy()
-X = cl[CF].fillna(cl[CF].median()); Xz = StandardScaler().fit_transform(X)
-pca = PCA(n_components=2, random_state=RNG); Xp = pca.fit_transform(Xz)
-print(f"Cluster-Datensatz: {X.shape[0]} FAUFs, {X.shape[1]} Features (ohne Walzen-Flags)")
-print(f"PCA-Varianz: PC1={pca.explained_variance_ratio_[0]:.1%}, PC2={pca.explained_variance_ratio_[1]:.1%}, "
-      f"Σ={pca.explained_variance_ratio_[:2].sum():.1%}")
+# %% ──────────────── ZELLE 4 ────────────────
+# === Datenvorbereitung ===
+PARAM_COLS = [COL_FAUF, COL_REZEPT, COL_SATZANFANG, COL_SATZENDE,
+              COL_SCHAUM, COL_WALZE, COL_WECHSEL, COL_WSC]
+PARAM_COLS = [c for c in PARAM_COLS if c in raw.columns]
+
+if IS_LONG:
+    r = raw.copy()
+    r["_MW"] = pd.to_numeric(r[COL_MITTELWERT], errors="coerce").replace(SENTINEL, np.nan)
+    print(f"999-Sentinel ersetzt: {(pd.to_numeric(raw[COL_MITTELWERT], errors='coerce')==SENTINEL).sum()} Zeilen")
+    pivot = r.pivot_table(index=COL_FAUF, columns=COL_MERKMAL, values="_MW", aggfunc="mean")
+    params = r.drop_duplicates(subset=COL_FAUF)[PARAM_COLS].set_index(COL_FAUF)
+    df = params.join(pivot).reset_index()
+else:
+    df = raw.copy()
+    for t in TARGETS:
+        if t in df.columns:
+            df[t] = df[t].replace(SENTINEL, np.nan)
+
+# numerische Prozessspalten zu float casten
+for c in [COL_SATZANFANG, COL_SATZENDE]:
+    if c in df.columns:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+# 4) Physikalisch unmögliche Verbundhaftung > 300 N -> NaN
+for t in TARGETS:
+    n_bad = (df[t] > VB_PHYS_MAX).sum()
+    df.loc[df[t] > VB_PHYS_MAX, t] = np.nan
+    print(f"{t}: {n_bad} Werte > {VB_PHYS_MAX} N entfernt -> n={df[t].notna().sum()}")
+
+# 5) Drift
+df["Drift_Paste"]     = df[COL_SATZANFANG] - df[COL_SATZENDE]
+df["Drift_abs"]       = df["Drift_Paste"].abs()
+df["Hat_Satzende"]    = df[COL_SATZENDE].notna().astype(int)
+df["Drift_Paste_imp"] = df["Drift_Paste"].fillna(0)
+df["Drift_abs_imp"]   = df["Drift_abs"].fillna(0)
+
+# 6) Ja/Nein-Encoding
+JN_MAP = {"ja": 1, "j": 1, "nein": 0, "n": 0, "nan": 0, "": 0}
+enc = lambda s: s.astype(str).str.strip().str.lower().map(JN_MAP).fillna(0).astype(int)
+df["Walze_gewechselt_enc"] = enc(df[COL_WECHSEL])
+df["Walze_WSC_enc"]        = enc(df[COL_WSC])
+
+# 7) Walze normalisieren
+def norm_walze(s):
+    if pd.isna(s): return np.nan
+    s = str(s).strip().upper().replace(" ", "")
+    s = s.replace("RO", "R0")
+    s = re.sub(r"R7(?=/|\d)", "R07", s)
+    return s
+df["Walze_norm"] = df[COL_WALZE].map(norm_walze)
+walze_ohe  = pd.get_dummies(df["Walze_norm"], prefix="Walze")
+df         = pd.concat([df, walze_ohe], axis=1)
+walze_cols = list(walze_ohe.columns)
+
+# 8) Schaumrezeptur normalisieren
+# Ziel: einheitliches Format, Schreibvarianten zusammenführen
+# z.B. "T/79/50/150" -> "T79/50/150", "70/55/M05" -> "T70/55/M05"
+def norm_schaum(s):
+    if pd.isna(s): return np.nan
+    s = str(s).strip().upper()
+    s = re.sub(r"[\s]+", "/", s)
+    s = re.sub(r"-{2,}", "-", s)
+    s = re.sub(r"/+", "/", s)
+    s = re.sub(r"^T/", "T", s)            # T/79.. -> T79..
+    s = re.sub(r"^(?=[0-9])", "T", s)     # 70/55.. -> T70/55.. (fehlendes T)
+    s = re.sub(r"(?<=\d)(?=[A-Z])", "/", # 78/55M11 -> 78/55/M11
+               re.sub(r"^T(?=[0-9])", "T", s))
+    s = re.sub(r"/+", "/", s).strip("/")
+    return s
+
+df["Schaum_norm"] = df[COL_SCHAUM].map(norm_schaum)
+
+# Für OHE/Training: seltene (<2 FAUFs) -> "Sonstige"
+sc = df["Schaum_norm"].value_counts()
+keep_s = sc[sc >= 2].index
+df["Schaum_clean"] = df["Schaum_norm"].where(df["Schaum_norm"].isin(keep_s), "Sonstige")
+schaum_ohe  = pd.get_dummies(df["Schaum_clean"], prefix="Schaum")
+df          = pd.concat([df, schaum_ohe], axis=1)
+schaum_cols = list(schaum_ohe.columns)
+
+# 9) Kaschierpastenrezeptur normalisieren
+# P-Prefix entfernen, Trenner vereinheitlichen, fehlende Slashes ergänzen
+# z.B. "P5570/82/91" -> "5570/82/91", "5070 54 91" -> "5070/54/91", "5070/5491" -> "5070/54/91"
+def norm_rezept(s):
+    if pd.isna(s): return np.nan
+    s = str(s).strip().upper()
+    s = re.sub(r"^P\s*", "", s)           # P-Prefix weg
+    s = re.sub(r"[\s\-]+", "/", s)        # Leerzeichen/Bindestriche -> /
+    s = re.sub(r"/+", "/", s)
+    s = re.sub(r"\+?H$", "", s).strip("/")
+    # fehlenden Slash reparieren: 5070/5491 -> 5070/54/91 (6 Ziffern nach /)
+    s = re.sub(r"(?<=/\d{2})(\d{2})$", r"/\1", s)
+    return s
+
+df["Rezept_norm"] = df[COL_REZEPT].map(norm_rezept)
+df["Rezept_Gruppe"] = df["Rezept_norm"].str.split("/").str[0]
+
+# Für OHE/Training: seltene (<2 FAUFs) -> "Sonstige"
+rc = df["Rezept_norm"].value_counts()
+keep_r = rc[rc >= 2].index
+df["Rezept_clean"] = df["Rezept_norm"].where(df["Rezept_norm"].isin(keep_r), "Sonstige")
+rezept_ohe  = pd.get_dummies(df["Rezept_clean"], prefix="Rezept")
+df          = pd.concat([df, rezept_ohe], axis=1)
+rezept_cols = list(rezept_ohe.columns)
+
+# 10) Numerische Features
+NUM_FEATURES = [COL_SATZANFANG, "Drift_Paste_imp", "Drift_abs_imp", "Hat_Satzende",
+                "Walze_gewechselt_enc", "Walze_WSC_enc"]
+NUM_FEATURES += [c for c in OPT_VISK if c in df.columns]
+for f in NUM_FEATURES:
+    if df[f].isna().mean() > 0.30:
+        df[f + "_isna"] = df[f].isna().astype(int)
+        if f + "_isna" not in NUM_FEATURES: NUM_FEATURES.append(f + "_isna")
+    if df[f].isna().any(): df[f] = df[f].fillna(df[f].median())
+
+# 11) Kontrolle
+print("\nWalzen (norm):", df["Walze_norm"].value_counts(dropna=False).to_dict())
+print("\nRezept_norm (alle):")
+print(df["Rezept_norm"].value_counts(dropna=False).to_string())
+print("\nSchaum_norm (alle):")
+print(df["Schaum_norm"].value_counts(dropna=False).to_string())
+print("\nOHE: Walze", len(walze_cols), "| Schaum", len(schaum_cols), "| Rezept", len(rezept_cols))
+print("Shape:", df.shape)
+print(df[TARGETS + [COL_SATZANFANG, "Drift_abs_imp"]].describe().round(2))
+
+
+# %% ──────────────── ZELLE 6 ────────────────
+# === Z-Score-Ausreißer auf Zielgrößen ===
+Z = 2.0
+df["Z_laengs"] = np.nan; df["Z_quer"] = np.nan
+ml = df[VB_LAENGS].notna(); mq = df[VB_QUER].notna()
+df.loc[ml, "Z_laengs"] = stats.zscore(df.loc[ml, VB_LAENGS])
+df.loc[mq, "Z_quer"]   = stats.zscore(df.loc[mq, VB_QUER])
+df["Z_outlier"] = (df["Z_laengs"].abs() > Z) | (df["Z_quer"].abs() > Z)
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+for ax, col, name in [(axes[0], VB_LAENGS, "längs"), (axes[1], VB_QUER, "quer")]:
+    v = df[col].dropna(); mu, sd = v.mean(), v.std()
+    ax.hist(v, bins=25, color="#4C72B0", edgecolor="white")
+    for k in (-Z, Z): ax.axvline(mu + k*sd, color="red", ls="--", lw=1)
+    ax.set_title(f"Verbundhaftung {name}  (μ={mu:.1f}, ±{Z}σ)"); ax.set_xlabel("N")
+plt.tight_layout(); plt.show()
+
+# Rezept_norm + Schaum_norm zeigen (echte Rezeptur, nicht kollabiert)
+out = df.loc[df["Z_outlier"],
+             [COL_FAUF, "Rezept_norm", "Schaum_norm",
+              VB_LAENGS, VB_QUER, "Z_laengs", "Z_quer"]]
+print(f"{len(out)} Z-Score-Ausreißer (|Z|>{Z}):")
+print(out.round(2).to_string(index=False))
 
 
 # %% ──────────────── ZELLE 1 ────────────────
